@@ -1,0 +1,345 @@
+# Alerta Next – Helm values. Every key is optional unless marked REQUIRED.
+# The minimum for a demo: database.password + ingress.host (see examples/values-demo.yaml).
+# Secrets: plain values in this file (demo), existing Kubernetes Secrets, or HashiCorp Vault via the Secrets Store
+# CSI Driver – see "secrets.mode" below.
+# Full guide: docs/deployment/README.md (EN) / README.pl.md (PL), section "Helm".
+
+# Base name of all objects (Deployments, Services, ServiceAccounts <name>-backend / <name>-db, Secrets …). Empty = the
+# release name, or <release>-alerta-next when the release name does not contain "alerta-next". Set it when names are
+# fixed elsewhere – e.g. a Vault role bound to the ServiceAccounts alerta-backend and alerta-db: fullnameOverride: alerta
+fullnameOverride: ""
+
+image:
+  registry: docker.io
+  backend: arturkiwa/alerta-next-backend
+  frontend: arturkiwa/alerta-next-frontend
+  tag: ""                     # empty = appVersion of the chart; backend and frontend always use the same tag
+  pullPolicy: IfNotPresent
+  pullSecrets: []             # names of existing docker-registry Secrets, e.g. [registry-login]
+
+# --- Secrets --------------------------------------------------------------------------------------------------------
+secrets:
+  # Where the database password, Alertmanager login and SSO client secret come from:
+  #   values   – plain text in this file (database.password, alertmanager.token, oidc.clientSecret); the chart creates
+  #              Kubernetes Secrets from them. Simple – for demos and tests.
+  #   existing – Kubernetes Secrets you create yourself (database.existingSecret, alertmanager.existingSecret,
+  #              oidc.existingSecret), e.g. by the Vault Secrets Operator or External Secrets.
+  #   csi      – HashiCorp Vault through the Secrets Store CSI Driver (driver + Vault provider installed in the
+  #              cluster). Values are mounted as files in the pods, never stored as Kubernetes Secrets.
+  mode: values
+  csi:
+    # Only for a CSI provider other than Vault (AWS, Azure, GCP …) or a SecretProviderClass you maintain yourself:
+    # its name. It must deliver files named like the keys of "objects" below. With Vault: leave EMPTY.
+    secretProviderClass: ""
+    vault:
+      address: ""             # REQUIRED with mode csi, e.g. https://vault.example.com:8200
+      authPath: kubernetes    # path of the Kubernetes auth method in Vault ("vault auth list", type kubernetes);
+                              # "kubernetes" unless it was enabled with -path=…
+      role: ""                # REQUIRED with mode csi: role in that auth method, bound to the ServiceAccounts
+                              # <release>-backend (and <release>-db with the internal database) in this namespace
+      namespace: ""           # Vault Enterprise namespace; empty = none
+      # Where each value lives in Vault: path (KV v2: <mount>/data/<path>) and key. The names on the left are fixed.
+      objects:
+        DB_USER: { path: secret/data/alerta-next/db, key: username }                    # REQUIRED
+        DB_PASSWORD: { path: secret/data/alerta-next/db, key: password }                # REQUIRED
+        # DB_MIGRATION_USER: { path: secret/data/alerta-next/db, key: migration-username }   # separate migration account
+        # DB_MIGRATION_PASSWORD: { path: secret/data/alerta-next/db, key: migration-password }
+        # ALERTMANAGER_TOKEN: { path: secret/data/alerta-next/alertmanager, key: token }       # Alertmanager login:
+        # ALERTMANAGER_USERNAME: { path: secret/data/alerta-next/alertmanager, key: username } # token, or username +
+        # ALERTMANAGER_PASSWORD: { path: secret/data/alerta-next/alertmanager, key: password } # password
+        # OIDC_CLIENT_SECRET: { path: secret/data/alerta-next/oidc, key: client-secret }       # REQUIRED with oidc
+        # ALERTMANAGER_WAW_TOKEN: { path: secret/data/alerta-next/am-waw, key: token }         # an Alertmanager from
+                                                                                               # "alertmanagers" (waw)
+
+# --- Database -------------------------------------------------------------------------------------------------------
+database:
+  # Login of the application. With the internal database it is also the PostgreSQL superuser, set ONLY when the data
+  # is created (first start) – changing it later needs ALTER ROLE in PostgreSQL (or a fresh volume).
+  # secrets.mode = values:
+  username: alerta
+  password: ""                # REQUIRED; the chart stores it in the Secret <release>-db
+  migrationUsername: ""       # optional separate account for schema migrations (external database): both or none
+  migrationPassword: ""
+  # secrets.mode = existing: Secret with keys username, password (optionally migration-username, migration-password)
+  existingSecret: ""
+
+  internal:                   # PostgreSQL 18 in the cluster (one pod, no HA; backups: backup.enabled below)
+    enabled: true
+    image: docker.io/library/postgres:18-alpine
+    storageClass: ""          # empty = the cluster's default storage class
+    size: 10Gi
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 1Gi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    # Nightly pg_dump of the internal database to a separate volume (runbook: docs/deployment/backup-runbook.md).
+    # The volume is in the same cluster – copy its dumps off the cluster too (the organisation's backup system).
+    backup:
+      enabled: false
+      schedule: "30 2 * * *"  # cron, in the cluster's time zone (UTC unless set otherwise)
+      keep: 14                # dumps kept on the volume (the oldest are deleted after a successful dump)
+      storageClass: ""        # best another storage than the database's; empty = the cluster's default
+      size: 20Gi
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 512Mi }
+
+  external:                   # used when internal.enabled = false
+    host: ""                  # e.g. pg.example.internal
+    port: 5432
+    name: alerta              # database name
+    sslMode: ""               # "" | require | verify-ca | verify-full; verify-* uses internalCA below as the root
+    url: ""                   # full JDBC URL instead of host/port/name/sslMode (wins when set)
+
+  schema: public              # schema of Alerta Next (must exist; "public" in a new database)
+  migrate: true               # false = a DBA applies db/migration/V*.sql before each upgrade
+  poolSize: 20                # connections per backend replica; max_connections >= (replicas + 1) * poolSize
+
+# --- Internal CA ----------------------------------------------------------------------------------------------------
+# Your organisation's CA (PEM, root + intermediates) for OUTGOING TLS: Alertmanager API, SSO provider, database with
+# sslMode verify-*. Mounted as /etc/alerta/ca/ca.crt and wired to all three automatically. Pick ONE:
+#   --set-file internalCA.certificate=./ca.crt      (file next to you, nothing to copy)
+#   certificate: |  -----BEGIN CERTIFICATE----- …    (pasted here; a CA certificate is public, fine in git)
+#   existingConfigMap: my-ca                          (ConfigMap with the key ca.crt, created beforehand)
+internalCA:
+  certificate: ""
+  existingConfigMap: ""
+
+# --- Integrations ---------------------------------------------------------------------------------------------------
+alertmanager:                 # Alertmanager API for silences from the console; empty url = no "Silence" button
+  url: ""                     # e.g. http://alertmanager.monitoring.svc:9093
+  # Login, if the Alertmanager API needs one. secrets.mode = values: Bearer token, or username + password, or nothing.
+  token: ""
+  username: ""
+  password: ""
+  existingSecret: ""          # secrets.mode = existing: Secret with the key token, or username + password
+
+# Further Alertmanagers (e.g. one per cluster), next to the one above (named "default"). API keys name no
+# Alertmanager: a silence goes to every Alertmanager that has the alert, blackouts to all.
+# Name: [a-z][a-z0-9-]*, unique.
+alertmanagers: []
+#  - name: waw
+#    url: https://alertmanager.waw.example.com
+#    token: ""                 # secrets.mode = values (or username + password)
+#    username: ""
+#    password: ""
+#    existingSecret: ""        # secrets.mode = existing: Secret with the key token, or username + password
+#    # secrets.mode = csi: objects ALERTMANAGER_WAW_TOKEN (or _USERNAME + _PASSWORD) – the name in capitals, "-" → "_"
+
+# Outgoing mail for the daily report users subscribe to in their profile (names as Alertmanager's smtp_*).
+# Empty smarthost = the report is not offered.
+mail:
+  smarthost: ""               # HOST:PORT of the relay (smtp_smarthost), e.g. 10.1.2.3:25; 465 = TLS from the start
+  from: ""                    # sender (smtp_from), e.g. alerta@example.com – REQUIRED with smarthost
+  hello: ""                   # name announced to the server (smtp_hello)
+  requireTls: false           # STARTTLS required (smtp_require_tls); the internalCA below is trusted for it
+  username: ""                # empty = relay without sign-in; with it the password below
+  password: ""                # secrets.mode = values
+  existingSecret: ""          # secrets.mode = existing: Secret with the key password
+                              # secrets.mode = csi: object MAIL_PASSWORD
+  consoleUrl: ""              # links in the mail; empty = https://<ingress.host>
+  timeZone: Europe/Warsaw     # when "7:00" is for users without a time zone in their profile
+  allowedDomains: []          # REQUIRED with smarthost: the only domains mail may go to, e.g. [example.com];
+                              # exact (subdomains only when listed) – any other address is refused and audited
+
+# E-mail notifications by rules (page "Powiadomienia" – groups, environments, severities, labels, reminders) instead of
+# Alertmanager's receivers. Needs mail above. Switched on only here, never in the UI.
+notifications:
+  enabled: false
+  batchWindow: 2m             # what arrives for one person within this time goes out in one mail
+  minInterval: 5m             # at most one mail per person this often
+
+oidc:                         # single sign-on with any OpenID Connect provider (Keycloak, Entra ID, …)
+  enabled: false
+  issuer: ""                  # e.g. https://sso.example.com/realms/example
+  clientId: alerta-next       # redirect URI to register: https://<ingress.host>/api/v1/auth/oidc/callback
+  clientSecret: ""            # secrets.mode = values
+  existingSecret: ""          # secrets.mode = existing: Secret with the key client-secret
+  label: ""                   # sign-in button text; empty = default
+  claims: {}                  # e.g. { username: preferred_username, display-name: name, email: email, groups: groups }
+
+# --- Application settings -------------------------------------------------------------------------------------------
+# How the application behaves. NOTHING HERE IS NEEDED for a working installation – the defaults below are built into
+# the image. To change a setting: uncomment it together with ALL its parent keys (keep the indentation) and set your
+# value; leave the rest commented. Rules:
+#   - a list is replaced as a whole (e.g. environments.classes: write every class you want, not only the new one);
+#   - durations: 30s, 15m, 8h, 30d;
+#   - Alertmanager and SSO: use the "alertmanager" / "oidc" sections above, not this one;
+#   - an invalid value stops the backend at start-up with the key name in its log (the old pods keep running).
+# Example – only local accounts "admin" and "breakglass" may sign in (everyone else via SSO), 12 h acknowledgements:
+#   config:
+#     alerta:
+#       auth:
+#         local:
+#           mode: BREAK_GLASS_ONLY
+#           break-glass-users: [admin, breakglass]
+#       alerts:
+#         ack-timeout: 12h
+config: {}
+#   alerta:
+#     auth:
+#       local:
+#         mode: ENABLED                # ENABLED = local accounts sign in | BREAK_GLASS_ONLY = only break-glass-users |
+#                                      # DISABLED = SSO only. Deliberately not changeable in the UI.
+#         break-glass-users: []        # usernames allowed with BREAK_GLASS_ONLY (emergency access when SSO is down)
+#       oidc:                          # advanced SSO options (the basics are in the "oidc" section above)
+#         scopes: [openid, profile, email]
+#         required-acr: []             # e.g. [mfa] – reject sign-ins without this authentication level
+#         end-session: true            # signing out of Alerta Next also ends the SSO session
+#         insecure-skip-verify: false  # true = do not verify the SSO certificate (tests only; prefer internalCA)
+#         timeout: 10s
+#
+#     session:                         # automatic sign-out
+#       idle-privileged: 30m           # idle limit of administrators (any administrative role)
+#       idle-standard: 8h              # idle limit of everyone else (operators on shift)
+#       absolute: 12h                  # sign-out after this long in any case
+#       kiosk-absolute: 30d            # kiosk accounts (wall screens, read-only): no idle limit, only this
+#
+#     login:                           # protection against password guessing
+#       max-failures: 5                # failed sign-ins in a row before the account is locked …
+#       lockout-base: 15m              # … for this long; doubles with each further lockout …
+#       lockout-max: 1h                # … up to this (never permanent)
+#       ip-max-failures: 20            # failed sign-ins from one IP address …
+#       ip-window: 15m                 # … within this period block that address
+#
+#     passwords:                       # local accounts
+#       min-length: 12
+#       min-length-privileged: 16      # accounts with administrative roles
+#       max-length: 128
+#       forbidden-words: [alerta]      # words a password may not contain, any case – add the organisation's and
+#                                      # systems' names (the list is replaced as a whole: keep "alerta")
+#       one-time-validity: 72h         # a one-time password (new account, reset) must be used within this time
+#
+#     accounts:
+#       temporary-max-validity: 180d   # longest validity of a temporary account (set when creating it in the UI)
+#
+#     environments:
+#       classes:                       # environment classes offered in the UI and how many days alerts are kept
+#         - { code: PROD, retention-days: 400 }       # (retention can be changed per environment in the UI)
+#         - { code: PREPROD, retention-days: 90 }
+#         - { code: UAT, retention-days: 30 }
+#         - { code: TEST, retention-days: 30 }
+#         - { code: DEV, retention-days: 14 }
+#
+#     alerts:
+#       ack-timeout: 8h                # an acknowledgement lapses after this and the alert needs attention again;
+#                                      # 0 = never (per-environment override in the UI)
+#       resolve-grace: 5m              # an alert counts as resolved only if it stays quiet this long – stops alerts
+#                                      # that flicker from filling the history; 0 = at once (per environment in the UI)
+#       highlight-new: 10m             # the console highlights a new or returning alert this long; 0 = never
+#       flapping-threshold: 3          # fired again this many times …
+#       flapping-window: 1h            # … within this period = marked as flapping
+#       # How incoming alerts are read – change only if your alerts use other label/annotation names:
+#       severity-label: severity       # label with the severity
+#       severity-aliases:              # its values (lower-case) → CRITICAL | ERROR | WARNING | INFORMATIONAL | NORMAL
+#         critical: CRITICAL           # (the whole map is replaced – list every value you use)
+#         error: ERROR
+#         err: ERROR
+#         warning: WARNING
+#         informational: INFORMATIONAL
+#         info: INFORMATIONAL
+#         normal: NORMAL
+#         ok: NORMAL
+#       title-label: alertname         # label shown as the alert title
+#       service-label: service         # label shown as the service
+#       summary-annotation: summary
+#       description-annotation: description
+#       runbook-annotation: runbook_url  # link to the runbook shown in the alert details
+#       watchdog-alertname: Watchdog   # the always-firing alert that proves the path Prometheus → Alerta Next works
+#       watchdog-timeout: 5m           # a Watchdog (one per Prometheus and Alertmanager) missing this long raises
+#                                      # WatchdogMissing
+#       max-alerts-per-request: 1000   # larger batches from a sender are rejected
+#
+#     integrations:
+#       alertmanager:                  # advanced options (url and login are in the "alertmanager" section above)
+#         insecure-skip-verify: false  # true = do not verify the Alertmanager certificate (tests only; prefer internalCA)
+#         timeout: 10s
+#         sync-interval: 30s           # how often silences made directly in Alertmanager are read back
+#
+#   logging:
+#     level:
+#       root: INFO
+#       io.alertanext.http: INFO       # one line per HTTP request; WARN = off
+#       io.alertanext.audit: INFO      # audit events also in the log (for a SIEM)
+
+session:
+  cookieSecure: true          # the UI MUST be reached over HTTPS; false ONLY for a plain-HTTP test
+
+logs:
+  consoleFormat: text         # text = readable lines (kubectl logs) | ecs = JSON (Elastic Common Schema) on stdout
+  file:
+    enabled: false            # additionally JSON (ECS) to /var/log/alerta/alerta-next.json (emptyDir) for a log sidecar
+  serviceEnvironment: ""      # "service.environment" in JSON logs, e.g. demo
+
+# --- Workloads ------------------------------------------------------------------------------------------------------
+backend:
+  replicas: 2                 # stateless; 2+ for rolling upgrades without downtime
+  resources:
+    requests: { cpu: 250m, memory: 768Mi }
+    limits: { memory: 1536Mi }
+  extraEnv: []                # e.g. [{ name: JAVA_TOOL_OPTIONS, value: "-XX:MaxRAMPercentage=60 -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=/tmp" }]
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+  spreadAcrossNodes: true     # soft spread of the replicas over nodes
+  pdb:
+    enabled: true
+    minAvailable: 1
+  extraVolumes: []            # e.g. for a log shipper sidecar reading /var/log/alerta (volume "logs")
+  extraVolumeMounts: []
+  extraContainers: []
+
+frontend:
+  # Proxies whose X-Forwarded-For is believed (who the client is – login limits, audit): the ingress controller pods
+  # and the load balancer in front, if it forwards the client address; e.g. [10.233.64.0/18]. Empty = only the
+  # direct connection (safe, but every client shows as the ingress).
+  trustedProxies: []
+  replicas: 2
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+  spreadAcrossNodes: true
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+# --- Access ---------------------------------------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  host: ""                    # REQUIRED when enabled, e.g. alerta.example.com
+  annotations:                # NGINX Ingress: request size, long-lived live updates (SSE) without buffering.
+    nginx.ingress.kubernetes.io/proxy-body-size: 5m          # another controller: replace with its equivalents
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # F5 NGINX Ingress Controller instead: nginx.org/client-max-body-size: "5m", nginx.org/proxy-read-timeout: "3600s",
+    # nginx.org/proxy-buffering: "False" (replace the three above)
+  tls:
+    enabled: false            # false = TLS ends on a load balancer in front of the ingress
+    secretName: ""            # kubernetes.io/tls Secret with your certificate (or one made by cert-manager)
+
+metrics:
+  podAnnotations: true        # prometheus.io/scrape|port|path on the backend pods (port 8081, /actuator/prometheus)
+  serviceMonitor:             # only with the Prometheus Operator (CRD monitoring.coreos.com)
+    enabled: false
+    interval: 30s
+    labels: {}                # e.g. { release: kube-prometheus-stack }
+
+networkPolicy:
+  enabled: false              # turn on only if your cluster enforces NetworkPolicies and you want them
+  ingressFrom: []             # who may reach the frontend (NetworkPolicyPeer list); empty = anyone
+  metricsFrom: []             # who may scrape the backend metrics (8081); empty = anyone
+  extraEgress: []             # backend egress besides DNS and the internal DB: external DB, Alertmanager, SSO, e.g.
+                              #   - to: [{ ipBlock: { cidr: 10.20.30.40/32 } }]
+                              #     ports: [{ protocol: TCP, port: 5432 }]

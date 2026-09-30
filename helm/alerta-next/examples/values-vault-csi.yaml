@@ -1,0 +1,24 @@
+# Secrets from HashiCorp Vault through the Secrets Store CSI Driver (driver and the Vault CSI provider installed in
+# the cluster), PostgreSQL in the cluster. Nothing secret in this file.
+#   helm install alerta-next deploy/helm/alerta-next -n alerta-next --create-namespace -f my-values.yaml
+#
+# In Vault beforehand (KV v2 mounted at "secret", Kubernetes auth at "kubernetes") – see docs/deployment, "Vault":
+#   vault kv put secret/alerta-next/db username=alerta password=<long random password>
+#   vault policy write alerta-next - <<'P'
+#   path "secret/data/alerta-next/*" { capabilities = ["read"] }
+#   P
+#   vault write auth/kubernetes/role/alerta-next bound_service_account_names=alerta-next-backend,alerta-next-db \
+#     bound_service_account_namespaces=alerta-next policies=alerta-next ttl=20m
+secrets:
+  mode: csi
+  csi:
+    vault:
+      address: https://vault.example.com:8200
+      authPath: kubernetes
+      role: alerta-next
+      objects:
+        DB_USER: { path: secret/data/alerta-next/db, key: username }
+        DB_PASSWORD: { path: secret/data/alerta-next/db, key: password }
+        # ALERTMANAGER_TOKEN: { path: secret/data/alerta-next/alertmanager, key: token }
+ingress:
+  host: alerta.example.com

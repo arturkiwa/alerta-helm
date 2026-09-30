@@ -1,0 +1,26 @@
+Alerta Next {{ include "alerta-next.tag" . }} is being installed in namespace {{ .Release.Namespace }}.
+
+1. Wait until it is ready (first start creates the database schema, 1-2 minutes):
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "alerta-next.fullname" . }}-backend
+
+2. Create the first administrator (prints a one-time password, to be changed at the first login):
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "alerta-next.fullname" . }}-backend -- alerta-admin create-admin admin "Administrator"
+
+3. Open {{ if .Values.ingress.enabled }}https://{{ .Values.ingress.host }}{{ else }}the UI (ingress disabled: kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "alerta-next.fullname" . }}-frontend 8080){{ end }}
+   and follow docs/deployment (section "Helm"): give yourself a role, create environments, create an API key
+   for Alertmanager.
+{{- if not .Values.session.cookieSecure }}
+
+WARNING: session.cookieSecure=false – only for a plain-HTTP test.
+{{- end }}
+{{- if .Values.database.internal.enabled }}
+
+NOTE: the internal PostgreSQL has no backups and no HA – fine for tests and demos only.
+{{- end }}
+{{- if include "alerta-next.csi" . }}
+
+SECRETS FROM VAULT (Secrets Store CSI Driver): the Vault role "{{ .Values.secrets.csi.vault.role }}" must be bound to
+  service accounts: {{ include "alerta-next.fullname" . }}-backend{{ if .Values.database.internal.enabled }}, {{ include "alerta-next.fullname" . }}-db{{ end }}
+  namespace:        {{ .Release.Namespace }}
+If pods stay in ContainerCreating: kubectl -n {{ .Release.Namespace }} describe pod <pod>  (events show the Vault error).
+{{- end }}

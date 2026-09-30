@@ -1,0 +1,115 @@
+{{- if and .Values.database.internal.enabled .Values.database.internal.backup.enabled }}
+{{- $name := printf "%s-db-backup" (include "alerta-next.fullname" .) }}
+{{- $db := printf "%s-db" (include "alerta-next.fullname" .) }}
+{{- $v := .Values.database.internal }}
+{{- $b := $v.backup }}
+{{- /* Nightly pg_dump (custom format, checked readable) to its own volume; the oldest beyond "keep" are deleted. */}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep   # dumps survive "helm uninstall"
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with $b.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $b.size }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+spec:
+  schedule: {{ $b.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "alerta-next.selector" (list . "db-backup") | nindent 12 }}
+            app.kubernetes.io/component: database-backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ $db }}
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            fsGroup: 70
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: backup
+              image: {{ $v.image }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              env:
+                - { name: PGHOST, value: {{ $db }} }
+                - { name: PGDATABASE, value: alerta }
+                - { name: KEEP, value: {{ $b.keep | quote }} }
+                {{- if not (include "alerta-next.csi" .) }}
+                - name: PGUSER
+                  valueFrom: { secretKeyRef: { name: {{ include "alerta-next.dbSecret" . }}, key: username } }
+                - name: PGPASSWORD
+                  valueFrom: { secretKeyRef: { name: {{ include "alerta-next.dbSecret" . }}, key: password } }
+                {{- end }}
+              command: [sh, -c]
+              args:
+                - |
+                  set -eu
+                  export PGUSER="${PGUSER:-$(cat /etc/alerta/secrets/DB_USER)}"
+                  export PGPASSWORD="${PGPASSWORD:-$(cat /etc/alerta/secrets/DB_PASSWORD)}"
+                  name="alerta-$(date -u +%Y%m%dT%H%M%SZ).dump"
+                  pg_dump -Fc -f "/backup/.$name.part"
+                  pg_restore --list "/backup/.$name.part" > /dev/null   # the dump can be read back
+                  mv "/backup/.$name.part" "/backup/$name"
+                  ls -1 /backup/alerta-*.dump | sort -r | tail -n +$((KEEP + 1)) | xargs -r rm -f
+                  rm -f /backup/.*.part
+                  echo "backup done: $name, $(wc -c < "/backup/$name") bytes; kept: $(ls -1 /backup/alerta-*.dump | wc -l)"
+              resources:
+                {{- toYaml $b.resources | nindent 16 }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }
+              volumeMounts:
+                - { name: backup, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                {{- if include "alerta-next.csi" . }}
+                - { name: secrets, mountPath: /etc/alerta/secrets, readOnly: true }
+                {{- end }}
+          volumes:
+            - name: backup
+              persistentVolumeClaim: { claimName: {{ $name }} }
+            - name: tmp
+              emptyDir: { sizeLimit: 64Mi }
+            {{- if include "alerta-next.csi" . }}
+            - name: secrets
+              csi:
+                driver: secrets-store.csi.k8s.io
+                readOnly: true
+                volumeAttributes: { secretProviderClass: {{ include "alerta-next.spcDatabase" . }} }
+            {{- end }}
+          {{- with $v.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $v.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
