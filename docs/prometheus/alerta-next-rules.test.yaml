@@ -1,0 +1,130 @@
+# Unit tests of alerta-next-rules.yaml: promtool test rules alerta-next-rules.test.yaml
+rule_files:
+  - alerta-next-rules.yaml
+evaluation_interval: 1m
+
+tests:
+  # Every replica gone – and only Alerta Next's namespace counts; another application's pods do not matter.
+  - interval: 1m
+    input_series:
+      - series: 'alerta_sessions_active{namespace="alerta", pod="alerta-backend-1"}'
+        values: '3x5 _x30'
+      - series: 'alerta_sessions_active{namespace="other-alerta", pod="alerta-backend-9"}'
+        values: '1x40'
+      - series: 'up{namespace="alerta", pod="some-other-app"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AlertaNextDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AlertaNextDown
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: alerta }
+            exp_annotations:
+              summary: 'Alerta Next nie działa (namespace alerta)'
+              description: >-
+                Żadna replika backendu nie wystawia metryk od ponad 2 min. Alerty z Alertmanagera nie docierają do konsoli,
+                nie ma powiadomień ani wyciszeń z konsoli. Sprawdź pody, bazę danych i logi backendu.
+      # a pod of another application in the same namespace is down: not Alerta Next's business
+      - eval_time: 20m
+        alertname: AlertaNextReplicaDown
+        exp_alerts: []
+
+  # One replica down while the other works; a single replica for long is only info.
+  - interval: 1m
+    input_series:
+      - series: 'up{namespace="alerta", pod="alerta-backend-1", job="alerta"}'
+        values: '1x40'
+      - series: 'up{namespace="alerta", pod="alerta-backend-2", job="alerta"}'
+        values: '1 1 0x38'
+      - series: 'alerta_sessions_active{namespace="alerta", pod="alerta-backend-1"}'
+        values: '2x40'
+      - series: 'alerta_sessions_active{namespace="alerta", pod="alerta-backend-2"}'
+        values: '2 2 _x38'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AlertaNextReplicaDown
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: alerta, pod: alerta-backend-2, job: alerta }
+            exp_annotations:
+              summary: 'Replika backendu Alerta Next alerta-backend-2 nie odpowiada'
+              description: Prometheus nie może odpytać repliki od 5 min; pozostałe repliki obsługują ruch. Sprawdź pod i jego zdarzenia.
+      - eval_time: 10m
+        alertname: AlertaNextDown
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AlertaNextSingleReplica
+        exp_alerts:
+          - exp_labels: { severity: info, namespace: alerta }
+            exp_annotations:
+              summary: 'Alerta Next działa w jednej replice (namespace alerta)'
+              description: >-
+                Brak zapasu – awaria lub restart jedynej repliki przerwie przyjmowanie alertów. Na produkcji zalecane są
+                co najmniej 2 repliki. Jeśli jedna replika jest zamierzona, wyłącz tę regułę.
+
+  # The Watchdog stops arriving (both replicas report the same age – one alert, not two); the audit chain breaks.
+  - interval: 1m
+    input_series:
+      - series: 'alerta_watchdog_age_seconds{namespace="alerta", pod="alerta-backend-1", alertmanager="default", source="alertmanager", watchdog=""}'
+        values: '60 120 180 240 300 360 420 480 540 600'
+      - series: 'alerta_watchdog_age_seconds{namespace="alerta", pod="alerta-backend-2", alertmanager="default", source="alertmanager", watchdog=""}'
+        values: '60 120 180 240 300 360 420 480 540 600'
+      - series: 'alerta_audit_chain_ok{namespace="alerta", pod="alerta-backend-1"}'
+        values: '1 1 1 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AlertaNextWatchdogMissing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: AlertaNextWatchdogMissing
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: alerta, alertmanager: default }
+            exp_annotations:
+              summary: 'Watchdog z Alertmanagera default nie dociera od 9m 0s'
+              description: >-
+                Łańcuch Prometheus → Alertmanager → Alerta Next jest przerwany – inne alerty też nie docierają.
+                Sprawdź Prometheusa (reguła Watchdog), Alertmanagera (trasa i webhook do Alerta Next, klucz API) i sieć.
+      - eval_time: 4m
+        alertname: AlertaNextAuditChainBroken
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: alerta }
+            exp_annotations:
+              summary: Łańcuch dziennika audytu Alerta Next jest przerwany albo niekompletny
+              description: >-
+                Nocne sprawdzenie wykryło wpis audytu zmieniony lub usunięty poza aplikacją albo starsze wpisy poza łańcuchem.
+                Szczegóły: Administracja → Stan systemu i `alerta-admin verify-audit`. Traktuj jako incydent bezpieczeństwa.
+
+  # 5xx: only Alerta Next's pods count, and a handful of errors does not wake anyone; the SSE stream is not "slow".
+  - interval: 1m
+    input_series:
+      # Alerta Next: 100 requests/min, 10 of them 5xx (10%)
+      - series: 'http_server_requests_seconds_count{namespace="alerta", pod="alerta-backend-1", uri="/api/v1/alerts", status="200"}'
+        values: '0+90x30'
+      - series: 'http_server_requests_seconds_count{namespace="alerta", pod="alerta-backend-1", uri="/api/v1/alerts", status="500"}'
+        values: '0+10x30'
+      - series: 'http_server_requests_seconds_sum{namespace="alerta", pod="alerta-backend-1", uri="/api/v1/alerts", status="200"}'
+        values: '0+9x30'
+      - series: 'http_server_requests_seconds_sum{namespace="alerta", pod="alerta-backend-1", uri="/api/v1/alerts", status="500"}'
+        values: '0+1x30'
+      # one console stream: a request lasting an hour, completed every minute (reconnects)
+      - series: 'http_server_requests_seconds_count{namespace="alerta", pod="alerta-backend-1", uri="/api/v1/alerts/stream", status="200"}'
+        values: '0+1x30'
+      - series: 'http_server_requests_seconds_sum{namespace="alerta", pod="alerta-backend-1", uri="/api/v1/alerts/stream", status="200"}'
+        values: '0+3600x30'
+      # another Spring Boot application in the same namespace, failing all the time
+      - series: 'http_server_requests_seconds_count{namespace="alerta", pod="other-app-1", uri="/x", status="500"}'
+        values: '0+100x30'
+      - series: 'alerta_sessions_active{namespace="alerta", pod="alerta-backend-1"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AlertaNextServerErrors
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: alerta }
+            exp_annotations:
+              summary: 'Alerta Next zwraca błędy serwera (9.901% żądań)'
+              description: Ponad 2% żądań kończy się kodem 5xx. Sprawdź logi backendu (identyfikator żądania w linii logu) i połączenie z bazą.
+      - eval_time: 20m
+        alertname: AlertaNextSlowResponses
+        exp_alerts: []

@@ -1,0 +1,278 @@
+# Prometheus alert rules for Alerta Next – a starting set: sensible severities and `for:` values, to be tuned.
+#
+# Scope: rules on Alerta Next's own metrics (alerta_*) need no selector; rules on general metrics (up, http_*, jvm_*,
+# hikaricp_*, …) keep only the series of Alerta Next's backend pods with `and on (namespace, pod) alerta_sessions_active`
+# – so the file works in any namespace and with several installations, without editing selectors. It expects the
+# usual `namespace` and `pod` labels on scraped series (pod discovery or a ServiceMonitor).
+#
+# Severities: critical = the alert path or the audit is broken (act now); warning = degraded, act today;
+# info = worth a look. Add your own routing labels (team, notify …) to `labels:`.
+#
+# Use: `rule_files:` in prometheus.yml, or in a PrometheusRule (Prometheus Operator) – `spec.groups` takes the
+# `groups` below unchanged. Check: `promtool check rules alerta-next-rules.yaml`,
+# `promtool test rules alerta-next-rules.test.yaml`.
+groups:
+  # ------------------------------------------------------------------------------------------------------------------
+  - name: alerta-next.availability
+    rules:
+      # Every replica gone: Alerta Next's metrics were there in the last hour and are not now.
+      - alert: AlertaNextDown
+        expr: |
+          count by (namespace) (max_over_time(alerta_sessions_active[1h]))
+            unless count by (namespace) (alerta_sessions_active)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Alerta Next nie działa (namespace {{ $labels.namespace }})'
+          description: >-
+            Żadna replika backendu nie wystawia metryk od ponad 2 min. Alerty z Alertmanagera nie docierają do konsoli,
+            nie ma powiadomień ani wyciszeń z konsoli. Sprawdź pody, bazę danych i logi backendu.
+
+      - alert: AlertaNextReplicaDown
+        expr: |
+          up == 0
+            and on (namespace, pod) max_over_time(alerta_sessions_active[15m])
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Replika backendu Alerta Next {{ $labels.pod }} nie odpowiada'
+          description: Prometheus nie może odpytać repliki od 5 min; pozostałe repliki obsługują ruch. Sprawdź pod i jego zdarzenia.
+
+      - alert: AlertaNextSingleReplica
+        expr: count by (namespace) (alerta_sessions_active) < 2
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: 'Alerta Next działa w jednej replice (namespace {{ $labels.namespace }})'
+          description: >-
+            Brak zapasu – awaria lub restart jedynej repliki przerwie przyjmowanie alertów. Na produkcji zalecane są
+            co najmniej 2 repliki. Jeśli jedna replika jest zamierzona, wyłącz tę regułę.
+
+      - alert: AlertaNextReplicaRestarting
+        expr: |
+          changes(process_start_time_seconds[30m]) > 2
+            and on (namespace, pod) alerta_sessions_active
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Replika Alerta Next {{ $labels.pod }} restartuje się ({{ $value }} razy w 30 min)'
+          description: Częste restarty – zwykle brak pamięci (OOMKilled), nieudane próby zdrowia albo brak połączenia z bazą. Sprawdź zdarzenia poda i logi.
+
+  # ------------------------------------------------------------------------------------------------------------------
+  - name: alerta-next.alert-path
+    rules:
+      # The most dangerous failure is a silent one: the always-firing Watchdog stopped arriving, so nothing else does.
+      # Alertmanager should repeat the Watchdog every 1–2 min (route with repeat_interval: 1m) – the threshold is 5 min.
+      - alert: AlertaNextWatchdogMissing
+        expr: max by (namespace, alertmanager, watchdog) (alerta_watchdog_age_seconds) > 300
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Watchdog z Alertmanagera {{ $labels.alertmanager }} nie dociera od {{ $value | humanizeDuration }}'
+          description: >-
+            Łańcuch Prometheus → Alertmanager → Alerta Next jest przerwany – inne alerty też nie docierają.
+            Sprawdź Prometheusa (reguła Watchdog), Alertmanagera (trasa i webhook do Alerta Next, klucz API) i sieć.
+
+      - alert: AlertaNextAlertPathSlow
+        expr: |
+          histogram_quantile(0.5, sum by (namespace, source, le) (rate(alerta_ingest_delay_seconds_bucket[30m]))) > 900
+            and sum by (namespace, source) (increase(alerta_ingest_delay_seconds_count[30m])) >= 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Alerty ({{ $labels.source }}) docierają do Alerta Next z opóźnieniem {{ $value | humanizeDuration }} (mediana)'
+          description: >-
+            Od początku problemu do pojawienia się w konsoli mija ponad 15 min. Obejmuje `for:` reguł i grupowanie
+            Alertmanagera, więc próg jest wysoki; jeśli to norma u Was, podnieś go. Sprawdź kolejkę i logi Alertmanagera
+            oraz czas ewaluacji reguł Prometheusa.
+
+      - alert: AlertaNextAlertsInQuarantine
+        expr: sum by (namespace) (max by (namespace, severity) (alerta_alerts_active{environment="(quarantine)"})) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $value }} alert(ów) w kwarantannie Alerta Next'
+          description: >-
+            Alerty nie pasują do żadnego środowiska – widzą je tylko administratorzy, nikt ich nie obsługuje.
+            Dopisz warunki środowiska (Administracja → Środowiska; pomoże Tester etykiet).
+
+      - alert: AlertaNextIngestRejected
+        expr: sum by (namespace, source) (increase(alerta_alerts_ingested_total{outcome="rejected"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Alerta Next odrzuca alerty ze źródła {{ $labels.source }} ({{ $value }} w 15 min)'
+          description: Klucz API nie obejmuje środowiska, do którego trafiają te alerty. Rozszerz klucz (Administracja → Klucze API) albo popraw etykiety alertów.
+
+      - alert: AlertaNextIngestUnauthorized
+        expr: |
+          sum by (namespace, uri) (increase(http_server_requests_seconds_count{uri=~"/api/v1/ingest/.*", status="401"}[10m])
+            and on (namespace, pod) alerta_sessions_active) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Nadawca bez ważnego klucza API ({{ $labels.uri }})'
+          description: >-
+            Alertmanager, skrypt lub ArgoCD wysyła do Alerta Next z kluczem nieważnym, wygasłym albo odwołanym – te dane
+            przepadają. Sprawdź klucz u nadawcy (Administracja → Klucze API pokazuje wygasające).
+
+      - alert: AlertaNextSilenceSyncFailing
+        expr: sum by (namespace, alertmanager) (increase(alerta_alertmanager_sync_total{outcome="failure"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Alerta Next nie synchronizuje wyciszeń z Alertmanagerem {{ $labels.alertmanager }}'
+          description: >-
+            Stan wyciszeń w konsoli może być nieaktualny, a wyciszanie z konsoli może nie działać. Sprawdź adres i dane
+            logowania Alertmanagera (alerta.integrations.alertmanagers) oraz Administracja → Stan systemu.
+
+  # ------------------------------------------------------------------------------------------------------------------
+  - name: alerta-next.security
+    rules:
+      - alert: AlertaNextAuditChainBroken
+        expr: max by (namespace) (alerta_audit_chain_ok) == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Łańcuch dziennika audytu Alerta Next jest przerwany albo niekompletny
+          description: >-
+            Nocne sprawdzenie wykryło wpis audytu zmieniony lub usunięty poza aplikacją albo starsze wpisy poza łańcuchem.
+            Szczegóły: Administracja → Stan systemu i `alerta-admin verify-audit`. Traktuj jako incydent bezpieczeństwa.
+
+      - alert: AlertaNextAuditChainNotChecked
+        expr: max by (namespace) (alerta_audit_chain_ok) == -1
+        for: 26h
+        labels:
+          severity: warning
+        annotations:
+          summary: Łańcuch dziennika audytu Alerta Next nie był sprawdzany od ponad doby
+          description: Nocne sprawdzenie (03:15) się nie wykonało. Sprawdź logi backendu i Administracja → Stan systemu (zadanie audit-verify).
+
+      - alert: AlertaNextLoginFailuresHigh
+        expr: sum by (namespace) (increase(alerta_auth_logins_total{outcome="failure"}[15m])) > 20
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Dużo nieudanych logowań do Alerta Next ({{ $value }} w 15 min)'
+          description: >-
+            Możliwe zgadywanie haseł albo problem z SSO. Powody w dzienniku audytu (Administracja → Dziennik audytu,
+            akcja auth.login) i w metryce alerta_auth_logins_total{reason}.
+
+      - alert: AlertaNextAccountLocked
+        expr: sum by (namespace) (increase(alerta_auth_lockouts_total[15m])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: 'Zablokowano konto w Alerta Next po nieudanych logowaniach ({{ $value }} w 15 min)'
+          description: Sprawdź w dzienniku audytu, które konto i z jakiego adresu. Jedna blokada to zwykle pomyłka użytkownika.
+
+  # ------------------------------------------------------------------------------------------------------------------
+  - name: alerta-next.runtime
+    rules:
+      # 5xx share of all requests – with a minimum volume, so a single error at night does not wake anyone.
+      - alert: AlertaNextServerErrors
+        expr: |
+          (
+            sum by (namespace) (rate(http_server_requests_seconds_count{status=~"5.."}[5m]) and on (namespace, pod) alerta_sessions_active)
+              / sum by (namespace) (rate(http_server_requests_seconds_count[5m]) and on (namespace, pod) alerta_sessions_active)
+          ) > 0.02
+            and sum by (namespace) (increase(http_server_requests_seconds_count{status=~"5.."}[5m]) and on (namespace, pod) alerta_sessions_active) >= 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Alerta Next zwraca błędy serwera ({{ $value | humanizePercentage }} żądań)'
+          description: Ponad 2% żądań kończy się kodem 5xx. Sprawdź logi backendu (identyfikator żądania w linii logu) i połączenie z bazą.
+
+      # The live console stream (SSE) stays open for hours – left out.
+      - alert: AlertaNextSlowResponses
+        expr: |
+          (
+            sum by (namespace) (rate(http_server_requests_seconds_sum{uri!="/api/v1/alerts/stream"}[5m]) and on (namespace, pod) alerta_sessions_active)
+              / sum by (namespace) (rate(http_server_requests_seconds_count{uri!="/api/v1/alerts/stream"}[5m]) and on (namespace, pod) alerta_sessions_active)
+          ) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Alerta Next odpowiada wolno (średnio {{ $value | humanizeDuration }})'
+          description: Średni czas odpowiedzi API ponad 1 s. Najczęściej baza (pula połączeń, wolne zapytania) albo brak CPU / pamięci poda.
+
+      - alert: AlertaNextDatabasePoolExhausted
+        expr: |
+          max by (namespace, pod) (hikaricp_connections_pending and on (namespace, pod) alerta_sessions_active) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Wyczerpana pula połączeń z bazą w {{ $labels.pod }}'
+          description: Wątki czekają na połączenie z bazą od 5 min. Sprawdź wolne zapytania i blokady w bazie albo zwiększ pulę.
+
+      - alert: AlertaNextDatabaseConnectionTimeouts
+        expr: |
+          sum by (namespace, pod) (increase(hikaricp_connections_timeout_total[5m]) and on (namespace, pod) alerta_sessions_active) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Alerta Next nie dostaje połączeń z bazą ({{ $labels.pod }})'
+          description: Żądania kończą się błędem, bo połączenie z bazą nie zostało przydzielone w czasie. Sprawdź dostępność bazy i jej obciążenie.
+
+      - alert: AlertaNextJvmHeapHigh
+        expr: |
+          max by (namespace, pod) (jvm_memory_usage_after_gc{area="heap", pool="long-lived"} and on (namespace, pod) alerta_sessions_active) > 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Pamięć JVM w {{ $labels.pod }} prawie pełna ({{ $value | humanizePercentage }} po odśmiecaniu)'
+          description: Sterta po GC stale ponad 90% – grozi spowolnieniem i OOM. Zwiększ limit pamięci poda albo sprawdź, czy zajętość rośnie (wyciek).
+
+      - alert: AlertaNextGcPressure
+        expr: |
+          sum by (namespace, pod) (rate(jvm_gc_pause_seconds_sum[5m]) and on (namespace, pod) alerta_sessions_active) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Replika {{ $labels.pod }} spędza {{ $value | humanizePercentage }} czasu na odśmiecaniu'
+          description: Ponad 10% czasu w przerwach GC – zwykle za mało pamięci. Zwiększ limit pamięci poda.
+
+      - alert: AlertaNextScheduledTaskFailing
+        expr: |
+          sum by (namespace, code_namespace, code_function) (
+            increase(tasks_scheduled_execution_seconds_count{outcome!="SUCCESS"}[30m]) and on (namespace, pod) alerta_sessions_active
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Zadanie w tle Alerta Next kończy się błędem: {{ $labels.code_namespace }}.{{ $labels.code_function }}'
+          description: Zadanie cykliczne (synchronizacja, powiadomienia, audyt, retencja…) rzuciło wyjątek. Szczegóły w logach backendu i w Administracja → Stan systemu.
+
+      - alert: AlertaNextErrorLogs
+        expr: |
+          sum by (namespace) (increase(logback_events_total{level="error"}[15m]) and on (namespace, pod) alerta_sessions_active) > 10
+        labels:
+          severity: info
+        annotations:
+          summary: 'Dużo błędów w logach Alerta Next ({{ $value }} w 15 min)'
+          description: Przejrzyj logi backendu (poziom ERROR) – pojedyncze błędy bywają normalne, seria zwykle ma jedną przyczynę.
+
+      - alert: AlertaNextFileDescriptorsHigh
+        expr: |
+          max by (namespace, pod) (
+            (process_files_open_files / process_files_max_files) and on (namespace, pod) alerta_sessions_active
+          ) > 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Replika {{ $labels.pod }} wykorzystuje {{ $value | humanizePercentage }} deskryptorów plików'
+          description: Bliski limit otwartych plików i połączeń – sprawdź liczbę połączeń (np. otwartych konsol) i limit w kontenerze.
