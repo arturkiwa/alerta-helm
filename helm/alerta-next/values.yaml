@@ -214,6 +214,12 @@ config: {}
 #
 #     accounts:
 #       temporary-max-validity: 180d   # longest validity of a temporary account (set when creating it in the UI)
+#       inactive-disable-after: 90d    # disable local accounts unused this long (empty = never, min. 30d; not SSO,
+#                                      # kiosk, break-glass or the last access administrator)
+#
+#     links:
+#       allowed-hosts: [grafana.example.com, "*.kibana.example.com"]   # links to other tools and of changes (ArgoCD)
+#                                      # (Administration → Labels): https only, only these hosts; empty = no links
 #
 #     environments:
 #       classes:                       # environment classes offered in the UI and how many days alerts are kept

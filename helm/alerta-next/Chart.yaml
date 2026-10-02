@@ -4,7 +4,7 @@ description: Alerta Next – alert console (web UI + API) with an optional Postg
 type: application
 version: 0.8.0
 # appVersion = image tag used when image.tag is empty; the release workflow sets it
-appVersion: "0.39.0"
+appVersion: "0.55.0"
 home: https://github.com/arturkiwa/alerta-next
 sources:
   - https://github.com/arturkiwa/alerta-next
