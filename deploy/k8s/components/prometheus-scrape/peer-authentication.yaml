@@ -1,0 +1,14 @@
+# A Prometheus outside the mesh scrapes in plain text; STRICT mTLS would reject it on the metrics port only.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: backend-metrics-plaintext
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    "8081":
+      mode: PERMISSIVE

@@ -66,4 +66,4 @@ curl -fsS -X POST https://alerta.example/api/v1/ingest/alerts \
 ## Zabbix (kierunek)
 Media type (webhook) Zabbixa wysyła problem jako `firing` z `fingerprint` = identyfikator zdarzenia i etykietami
 z tagów/hosta, a odzyskanie jako `resolved` z tym samym `fingerprint`; ważność Zabbixa mapowana na `severity`
-(aliasy w `alerta.alerts.severity-aliases`). Gotowy skrypt media type – po ustaleniach z planu (`docs/notifications-plan.md`).
+(aliasy w `alerta.alerts.severity-aliases`).

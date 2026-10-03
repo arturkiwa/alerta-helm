@@ -1,0 +1,779 @@
+# Alert rules for the test cluster, adapted from awesome-prometheus-alerts (samber/awesome-prometheus-alerts).
+# Only rules whose metrics exist here: node-exporter, kube-state-metrics, kubelet, API server, control plane,
+# CoreDNS/nodelocaldns, Ceph (Rook mgr), Istio, ArgoCD, Prometheus and Alertmanager. Host disk rules cover local
+# disks only (sd/vd/nvme/dm) – RBD/NBD devices are Ceph clients, covered by the Ceph rules.
+# Labels: severity (critical | warning | info – mapped by Alerta Next), service (grouping in the console),
+# notify (team). Change: edit, kubectl apply -f 11-rules.yaml, then curl -X POST …/-/reload or restart Prometheus.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: monitoring
+data:
+  monitoring.yml: |
+    groups:
+      - name: monitoring
+        rules:
+          # Always firing: proves the Prometheus → Alertmanager → Alerta chain (Alerta treats it as a heartbeat).
+          - alert: Watchdog
+            expr: vector(1)
+            labels: { severity: none }
+            annotations:
+              summary: Łańcuch alertów działa
+          - alert: TargetDown
+            expr: up == 0
+            for: 3m
+            labels: { severity: warning, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Cel scrapowania niedostępny: {{ $labels.job }} {{ $labels.instance }}'
+              description: 'Prometheus nie może pobrać metryk z {{ $labels.instance }} (job {{ $labels.job }}) od 3 minut.'
+          - alert: PrometheusConfigurationReloadFailure
+            expr: prometheus_config_last_reload_successful != 1
+            labels: { severity: warning, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: Prometheus nie wczytał nowej konfiguracji
+              description: Ostatnie przeładowanie konfiguracji Prometheusa się nie powiodło – działa poprzednia wersja.
+          - alert: PrometheusRuleEvaluationFailures
+            expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+            labels: { severity: warning, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Błędy wyliczania reguł w grupie {{ $labels.rule_group }}'
+              description: 'Prometheus nie wyliczył {{ $value | humanize }} reguł w ciągu 5 min – część alertów może nie działać.'
+          - alert: PrometheusAlertmanagerNotConnected
+            expr: prometheus_notifications_alertmanagers_discovered < 1
+            for: 2m
+            labels: { severity: critical, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: Prometheus nie widzi Alertmanagera
+              description: Alerty nie są nigdzie wysyłane.
+          - alert: PrometheusNotificationsFailing
+            expr: rate(prometheus_notifications_errors_total[5m]) > 0
+            for: 5m
+            labels: { severity: critical, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: Prometheus nie może wysłać alertów do Alertmanagera
+          - alert: PrometheusTsdbCompactionsFailing
+            expr: increase(prometheus_tsdb_compactions_failed_total[1h]) > 0
+            labels: { severity: warning, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: Błędy kompakcji bazy Prometheusa
+          - alert: PrometheusTsdbWalCorruptions
+            expr: increase(prometheus_tsdb_wal_corruptions_total[1h]) > 0
+            labels: { severity: critical, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: Uszkodzony WAL Prometheusa
+          - alert: PrometheusStorageAlmostFull
+            expr: |
+              kubelet_volume_stats_available_bytes{namespace="monitoring", persistentvolumeclaim="prometheus-data"}
+                / kubelet_volume_stats_capacity_bytes < 0.15
+            for: 10m
+            labels: { severity: warning, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Wolumen danych Prometheusa: zostało {{ $value | humanizePercentage }}'
+          - alert: AlertmanagerNotificationsFailing
+            expr: rate(alertmanager_notifications_failed_total[5m]) > 0
+            for: 2m
+            labels: { severity: critical, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Alertmanager nie może dostarczyć powiadomień ({{ $labels.integration }})'
+              description: Sprawdź logi Alertmanagera i klucz API Alerty (Secret alertmanager-alerta-token).
+          - alert: AlertmanagerConfigurationReloadFailure
+            expr: alertmanager_config_last_reload_successful != 1
+            labels: { severity: warning, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: Alertmanager nie wczytał nowej konfiguracji
+          - alert: MonitoringComponentRestarting
+            expr: changes(process_start_time_seconds{job=~"prometheus|alertmanager|kube-state-metrics|node-exporter"}[30m]) > 2
+            labels: { severity: warning, service: Monitoring, notify: SBE-ADMIN }
+            annotations:
+              summary: '{{ $labels.job }} na {{ $labels.instance }} restartuje się ({{ $value }} razy w 30 min)'
+
+  alerta-next.yml: |
+    groups:
+      - name: alerta-next
+        rules:
+          # Backend runs in 2+ replicas: one replica down is a warning, none left is critical.
+          - alert: AlertaNextBackendDown
+            expr: (sum(up{namespace="alerta-next", pod=~"alerta-next-backend-.*"}) or vector(0)) < 1
+            for: 2m
+            labels: { severity: critical, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Żadna replika backendu Alerta Next nie odpowiada'
+              description: Konsola alertów nie działa albo nie przyjmuje alertów z Alertmanagera.
+          - alert: AlertaNextBackendReplicaDown
+            expr: up{namespace="alerta-next", pod=~"alerta-next-backend-.*"} == 0
+            for: 5m
+            labels: { severity: warning, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Replika backendu Alerta Next ({{ $labels.pod }}) nie odpowiada'
+              description: Konsola działa na pozostałych replikach, ale bez zapasu.
+          # Values read from the database are reported by every replica: take one (max), without pod/instance labels –
+          # otherwise every replica (and every new pod after a rollout) raises its own alert.
+          - alert: AlertaNextWatchdogMissing
+            expr: max without (pod, instance) (alerta_watchdog_age_seconds{source="alertmanager"}) > 300
+            for: 2m
+            labels: { severity: critical, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Alerta Next nie dostaje Watchdoga od {{ $value | humanizeDuration }}'
+              description: Łańcuch Prometheus → Alertmanager → Alerta Next jest zerwany – nowe alerty nie docierają do konsoli.
+          # Counted per replica when an alert arrives (not read from the database): sum the replicas. The delay includes
+          # the rules' own `for:` and Alertmanager's grouping, so the threshold is well above the usual value.
+          - alert: AlertaNextAlertPathSlow
+            expr: |
+              histogram_quantile(0.5, sum by (le, source) (rate(alerta_ingest_delay_seconds_bucket{namespace="alerta-next"}[30m]))) > 900
+              and sum by (source) (increase(alerta_ingest_delay_seconds_count{namespace="alerta-next"}[30m])) >= 5
+            for: 15m
+            labels: { severity: warning, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Alerty ({{ $labels.source }}) docierają do Alerta Next z opóźnieniem {{ $value | humanizeDuration }} (mediana)'
+              description: Ścieżka działa, ale jest wolna – sprawdź kolejkę i logi Alertmanagera oraz czas ewaluacji reguł Prometheusa.
+          # Nightly check of the audit log's hash chain (alerta-admin verify-audit tells what and where).
+          - alert: AlertaNextAuditChainBroken
+            expr: max without (pod, instance) (alerta_audit_chain_ok{namespace="alerta-next"}) == 0
+            labels: { severity: critical, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: Łańcuch skrótów dziennika audytu Alerta Next jest przerwany albo niekompletny
+              description: Wpis audytu zmieniony albo usunięty poza aplikacją, albo starsze wpisy poza łańcuchem (orphaned). Szczegóły – Stan systemu i alerta-admin verify-audit; zgłoś jako incydent bezpieczeństwa.
+          - alert: AlertaNextServerErrors
+            expr: sum by (pod) (rate(http_server_requests_seconds_count{namespace="alerta-next", status=~"5.."}[5m])) > 0
+            for: 5m
+            labels: { severity: warning, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Alerta Next odpowiada błędami 5xx ({{ $value | humanize }}/s)'
+              description: Szczegóły w logach backendu (identyfikator żądania w odpowiedzi i w logu).
+          - alert: AlertaNextSilenceSyncFailing
+            expr: increase(alerta_alertmanager_sync_total{outcome="failure"}[10m]) > 0
+            for: 10m
+            labels: { severity: warning, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: Alerta Next nie może zsynchronizować wyciszeń z Alertmanagerem
+          - alert: AlertaNextAlertsInQuarantine
+            expr: sum(max without (pod, instance) (alerta_alerts_active{environment="(quarantine)"})) > 0
+            for: 15m
+            labels: { severity: warning, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: '{{ $value }} alertów w kwarantannie – nie pasują do żadnego środowiska'
+              description: Operatorzy ich nie widzą. Dopisz warunki środowisku (Administracja → Środowiska).
+          - alert: AlertaNextDatabasePoolExhausted
+            expr: max by (pod) (hikaricp_connections_pending{namespace="alerta-next"}) > 0
+            for: 5m
+            labels: { severity: warning, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Alerta Next czeka na połączenia z bazą ({{ $value }} w kolejce)'
+          - alert: AlertaNextJvmHeapHigh
+            expr: |
+              sum by (pod) (jvm_memory_used_bytes{namespace="alerta-next", area="heap"})
+                / sum by (pod) (jvm_memory_max_bytes{namespace="alerta-next", area="heap"} > 0) > 0.9
+            for: 15m
+            labels: { severity: warning, service: Alerta Next, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Alerta Next: sterta JVM zajęta w {{ $value | humanizePercentage }}'
+
+  nodes.yml: |
+    groups:
+      - name: nodes
+        rules:
+          - alert: HostDown
+            expr: up{job="node-exporter"} == 0
+            for: 2m
+            labels: { severity: critical, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }} nie odpowiada'
+              description: node-exporter na węźle nie odpowiada od 2 minut – węzeł może być wyłączony lub odcięty od sieci.
+          - alert: HostOutOfMemory
+            expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+            for: 2m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: wolne {{ $value | humanizePercentage }} pamięci'
+          - alert: HostMemoryUnderMemoryPressure
+            expr: rate(node_vmstat_pgmajfault[5m]) > 1000
+            for: 5m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }} pod presją pamięci ({{ $value | humanize }} page faultów/s)'
+          - alert: HostOomKillDetected
+            expr: increase(node_vmstat_oom_kill[5m]) > 0
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'OOM killer zabił proces na {{ $labels.instance }}'
+          - alert: HostSwapIsFillingUp
+            expr: (1 - node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes) > 0.8 and node_memory_SwapTotal_bytes > 0
+            for: 5m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: swap zajęty w {{ $value | humanizePercentage }}'
+          - alert: HostHighCpuLoad
+            expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.85
+            for: 15m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: CPU zajęte w {{ $value | humanizePercentage }} od 15 min'
+          - alert: HostCpuStealNoisyNeighbor
+            expr: avg by (instance) (rate(node_cpu_seconds_total{mode="steal"}[5m])) > 0.10
+            for: 10m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: hypervisor zabiera {{ $value | humanizePercentage }} CPU (steal)'
+          - alert: HostCpuHighIowait
+            expr: avg by (instance) (rate(node_cpu_seconds_total{mode="iowait"}[5m])) > 0.10
+            for: 10m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: CPU czeka na dysk przez {{ $value | humanizePercentage }} czasu'
+          - alert: HostLoadHigh
+            expr: node_load15 / count without (cpu, mode) (node_cpu_seconds_total{mode="idle"}) > 2
+            for: 15m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: load15 to {{ $value | humanize }}× liczba rdzeni'
+          - alert: HostOutOfDiskSpace
+            expr: |
+              node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.10
+                and on (instance, device, mountpoint) node_filesystem_readonly == 0
+            for: 2m
+            labels: { severity: critical, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: na {{ $labels.mountpoint }} zostało {{ $value | humanizePercentage }}'
+          - alert: HostDiskSpaceLow
+            expr: |
+              node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.20
+                and on (instance, device, mountpoint) node_filesystem_readonly == 0
+            for: 10m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: na {{ $labels.mountpoint }} zostało {{ $value | humanizePercentage }}'
+          - alert: HostDiskWillFillIn24Hours
+            expr: |
+              node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.25
+                and on (instance, device, mountpoint) predict_linear(node_filesystem_avail_bytes[6h], 24 * 3600) < 0
+                and on (instance, device, mountpoint) node_filesystem_readonly == 0
+            for: 30m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: {{ $labels.mountpoint }} zapełni się w ciągu doby przy obecnym tempie'
+          - alert: HostOutOfInodes
+            expr: |
+              node_filesystem_files_free / node_filesystem_files < 0.10
+                and on (instance, device, mountpoint) node_filesystem_readonly == 0
+            for: 5m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: na {{ $labels.mountpoint }} zostało {{ $value | humanizePercentage }} i-węzłów'
+          - alert: HostFilesystemDeviceError
+            expr: node_filesystem_device_error == 1
+            for: 5m
+            labels: { severity: critical, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: błąd systemu plików {{ $labels.mountpoint }}'
+          - alert: HostFilesystemReadOnly
+            expr: node_filesystem_readonly{mountpoint=~"/|/var.*|/opt.*|/home.*"} == 1
+            for: 2m
+            labels: { severity: critical, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: {{ $labels.mountpoint }} przełączony w tryb tylko do odczytu'
+          - alert: HostUnusualDiskReadLatency
+            expr: |
+              rate(node_disk_read_time_seconds_total{device=~"(sd|vd|xvd|hd|nvme|dm-).*"}[5m]) / rate(node_disk_reads_completed_total{device=~"(sd|vd|xvd|hd|nvme|dm-).*"}[5m]) > 0.1
+                and rate(node_disk_reads_completed_total{device=~"(sd|vd|xvd|hd|nvme|dm-).*"}[5m]) > 0
+            for: 10m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: odczyt z {{ $labels.device }} trwa {{ $value | humanizeDuration }}'
+          - alert: HostUnusualDiskWriteLatency
+            expr: |
+              rate(node_disk_write_time_seconds_total{device=~"(sd|vd|xvd|hd|nvme|dm-).*"}[5m]) / rate(node_disk_writes_completed_total{device=~"(sd|vd|xvd|hd|nvme|dm-).*"}[5m]) > 0.1
+                and rate(node_disk_writes_completed_total{device=~"(sd|vd|xvd|hd|nvme|dm-).*"}[5m]) > 0
+            for: 10m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: zapis na {{ $labels.device }} trwa {{ $value | humanizeDuration }}'
+          - alert: HostDiskIoSaturated
+            expr: rate(node_disk_io_time_seconds_total{device=~"(sd|vd|xvd|hd|nvme|dm-).*"}[5m]) > 0.9
+            for: 15m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: dysk {{ $labels.device }} zajęty w {{ $value | humanizePercentage }} czasu'
+          - alert: HostNetworkReceiveErrors
+            expr: rate(node_network_receive_errs_total[5m]) / rate(node_network_receive_packets_total[5m]) > 0.01
+            for: 5m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: błędy odbioru na {{ $labels.device }} ({{ $value | humanizePercentage }})'
+          - alert: HostNetworkTransmitErrors
+            expr: rate(node_network_transmit_errs_total[5m]) / rate(node_network_transmit_packets_total[5m]) > 0.01
+            for: 5m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: błędy wysyłania na {{ $labels.device }} ({{ $value | humanizePercentage }})'
+          - alert: HostNetworkInterfaceDown
+            expr: node_network_up{device=~"(en|eth|ens|eno|bond).*"} == 0 and on (instance, device) node_network_info{operstate!="unknown"}
+            for: 2m
+            labels: { severity: critical, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: interfejs {{ $labels.device }} nie działa'
+          - alert: HostConntrackLimit
+            expr: node_nf_conntrack_entries / node_nf_conntrack_entries_limit > 0.8
+            for: 5m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: tablica conntrack zajęta w {{ $value | humanizePercentage }}'
+          - alert: HostClockSkew
+            expr: |
+              (node_timex_offset_seconds > 0.05 and deriv(node_timex_offset_seconds[5m]) >= 0)
+                or (node_timex_offset_seconds < -0.05 and deriv(node_timex_offset_seconds[5m]) <= 0)
+            for: 10m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: zegar rozjechany o {{ $value | humanizeDuration }}'
+          - alert: HostClockNotSynchronising
+            expr: min_over_time(node_timex_sync_status[5m]) == 0 and node_timex_maxerror_seconds >= 16
+            for: 10m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: zegar nie synchronizuje się z NTP'
+          - alert: HostKernelVersionDeviations
+            expr: count(count by (release) (node_uname_info)) > 1
+            for: 6h
+            labels: { severity: info, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzły mają różne wersje jądra ({{ $value }})'
+              description: Normalne w trakcie aktualizacji klastra; po 6 h oznacza niedokończony upgrade.
+          - alert: HostRebooted
+            expr: time() - node_boot_time_seconds < 600
+            labels: { severity: info, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }} został zrestartowany'
+          - alert: HostTooManyOpenFiles
+            expr: node_filefd_allocated / node_filefd_maximum > 0.8
+            for: 5m
+            labels: { severity: warning, service: Węzły, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.instance }}: otwarte deskryptory plików {{ $value | humanizePercentage }} limitu'
+
+  kubernetes.yml: |
+    groups:
+      - name: kubernetes-nodes
+        rules:
+          - alert: KubernetesNodeNotReady
+            expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+            for: 5m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.node }} nie jest gotowy (NotReady)'
+          - alert: KubernetesNodePressure
+            expr: kube_node_status_condition{condition=~"MemoryPressure|DiskPressure|PIDPressure", status="true"} == 1
+            for: 2m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.node }}: {{ $labels.condition }}'
+              description: Kubelet zaczyna usuwać pody z węzła.
+          - alert: KubernetesNodeNetworkUnavailable
+            expr: kube_node_status_condition{condition="NetworkUnavailable", status="true"} == 1
+            for: 2m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.node }}: sieć niedostępna'
+          - alert: KubernetesNodeCordoned
+            expr: kube_node_spec_unschedulable == 1
+            for: 30m
+            labels: { severity: info, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.node }} wyłączony z planowania (cordon) od ponad 30 min'
+          - alert: KubernetesNodeTooManyPods
+            expr: |
+              sum by (node) (kube_pod_info{node!=""} unless on (namespace, pod) kube_pod_status_phase{phase=~"Succeeded|Failed"} == 1)
+                / sum by (node) (kube_node_status_allocatable{resource="pods"}) > 0.9
+            for: 10m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.node }}: {{ $value | humanizePercentage }} limitu podów'
+          - alert: KubernetesNodeMemoryOvercommitted
+            expr: |
+              sum by (node) (kube_pod_container_resource_requests{resource="memory"} * on (namespace, pod) group_left group by (namespace, pod) (kube_pod_status_phase{phase="Running"} == 1))
+                / sum by (node) (kube_node_status_allocatable{resource="memory"}) > 0.95
+            for: 15m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Węzeł {{ $labels.node }}: requesty pamięci to {{ $value | humanizePercentage }} dostępnej'
+          - alert: KubeletPlegSlow
+            expr: histogram_quantile(0.99, sum by (instance, le) (rate(kubelet_pleg_relist_duration_seconds_bucket[5m]))) >= 10
+            for: 5m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Kubelet na {{ $labels.instance }} wolno odświeża stan podów (PLEG {{ $value | humanizeDuration }})'
+          - alert: KubeletClientCertificateRotationFailing
+            expr: increase(kubelet_certificate_manager_client_expiration_renew_errors[15m]) > 0
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Kubelet na {{ $labels.instance }} nie może odnowić certyfikatu klienta'
+
+      - name: kubernetes-workloads
+        rules:
+          - alert: KubernetesPodCrashLooping
+            # The container is briefly "running" between back-offs, so look at the last 5 minutes, not the instant.
+            expr: max by (namespace, pod, container) (max_over_time(kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}[5m])) == 1
+            for: 5m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} ({{ $labels.container }}) restartuje się w pętli'
+          - alert: KubernetesPodFrequentRestarts
+            expr: increase(kube_pod_container_status_restarts_total[1h]) > 5
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Kontener {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}: {{ $value | humanize }} restartów w godzinę'
+          - alert: KubernetesContainerOomKilled
+            expr: |
+              increase(kube_pod_container_status_restarts_total[15m]) > 0
+                and on (namespace, pod, container) kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Kontener {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} zabity za przekroczenie pamięci (OOMKilled)'
+          - alert: KubernetesImagePullFailing
+            expr: max by (namespace, pod, container, reason) (kube_pod_container_status_waiting_reason{reason=~"ImagePullBackOff|ErrImagePull|InvalidImageName"}) == 1
+            for: 5m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Pod {{ $labels.namespace }}/{{ $labels.pod }}: nie można pobrać obrazu ({{ $labels.reason }})'
+          - alert: KubernetesContainerConfigError
+            expr: max by (namespace, pod, container, reason) (kube_pod_container_status_waiting_reason{reason=~"CreateContainerConfigError|CreateContainerError|RunContainerError"}) == 1
+            for: 5m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Pod {{ $labels.namespace }}/{{ $labels.pod }}: kontener nie startuje ({{ $labels.reason }})'
+          - alert: KubernetesPodNotHealthy
+            expr: max by (namespace, pod, phase) (kube_pod_status_phase{phase=~"Pending|Unknown|Failed"}) == 1
+            for: 15m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} w stanie {{ $labels.phase }} od 15 min'
+          - alert: KubernetesPodNotReady
+            expr: |
+              max by (namespace, pod) (kube_pod_status_ready{condition="false"}) == 1
+                unless on (namespace, pod) max by (namespace, pod) (kube_pod_status_phase{phase=~"Succeeded|Failed|Pending"}) == 1
+                unless on (namespace, pod) kube_pod_owner{owner_kind="Job"}
+            for: 15m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} działa, ale nie jest gotowy od 15 min'
+          - alert: KubernetesDeploymentReplicasMismatch
+            expr: kube_deployment_spec_replicas != kube_deployment_status_replicas_available
+            for: 10m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Deployment {{ $labels.namespace }}/{{ $labels.deployment }}: dostępnych replik mniej niż zadeklarowano'
+          - alert: KubernetesDeploymentUnavailable
+            expr: kube_deployment_status_replicas_available == 0 and kube_deployment_spec_replicas > 0
+            for: 5m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Deployment {{ $labels.namespace }}/{{ $labels.deployment }} nie ma żadnej dostępnej repliki'
+          - alert: KubernetesDeploymentRolloutStuck
+            expr: kube_deployment_status_observed_generation != kube_deployment_metadata_generation
+            for: 15m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Deployment {{ $labels.namespace }}/{{ $labels.deployment }}: wdrożenie nowej wersji utknęło'
+          - alert: KubernetesStatefulsetReplicasMismatch
+            expr: kube_statefulset_status_replicas_ready != kube_statefulset_status_replicas
+            for: 10m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }}: nie wszystkie repliki gotowe'
+          - alert: KubernetesStatefulsetDown
+            expr: kube_statefulset_status_replicas_ready == 0 and kube_statefulset_replicas > 0
+            for: 5m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} nie ma żadnej gotowej repliki'
+          - alert: KubernetesStatefulsetUpdateNotRolledOut
+            expr: |
+              max without (revision) (kube_statefulset_status_current_revision unless kube_statefulset_status_update_revision)
+                * (kube_statefulset_replicas != kube_statefulset_status_replicas_updated)
+            for: 15m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }}: aktualizacja nie została wdrożona'
+          - alert: KubernetesDaemonsetRolloutStuck
+            expr: |
+              kube_daemonset_status_number_ready / kube_daemonset_status_desired_number_scheduled < 1
+                or kube_daemonset_status_desired_number_scheduled - kube_daemonset_status_current_number_scheduled > 0
+            for: 15m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }}: nie działa na wszystkich węzłach'
+          - alert: KubernetesDaemonsetMisscheduled
+            expr: kube_daemonset_status_number_misscheduled > 0
+            for: 10m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }}: pody na niewłaściwych węzłach'
+          - alert: KubernetesJobFailed
+            expr: kube_job_status_failed > 0 and on (namespace, job_name) kube_job_status_active == 0
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Zadanie {{ $labels.namespace }}/{{ $labels.job_name }} zakończyło się błędem'
+          - alert: KubernetesJobTooLong
+            expr: time() - kube_job_status_start_time > 12 * 3600 and on (namespace, job_name) kube_job_status_active > 0
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Zadanie {{ $labels.namespace }}/{{ $labels.job_name }} trwa ponad 12 h'
+          - alert: KubernetesHpaMaxedOut
+            expr: kube_horizontalpodautoscaler_status_current_replicas == kube_horizontalpodautoscaler_spec_max_replicas
+            for: 30m
+            labels: { severity: info, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} od 30 min na maksymalnej liczbie replik'
+          - alert: KubernetesPdbBlocksDrain
+            expr: kube_poddisruptionbudget_status_pod_disruptions_allowed == 0 and kube_poddisruptionbudget_status_expected_pods > 0
+            for: 1h
+            labels: { severity: info, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'PDB {{ $labels.namespace }}/{{ $labels.poddisruptionbudget }} nie pozwala na żadne przerwanie – blokuje drain węzła'
+          - alert: ContainerMemoryNearLimit
+            expr: |
+              max by (namespace, pod, container) (container_memory_working_set_bytes{container!=""})
+                / max by (namespace, pod, container) (container_spec_memory_limit_bytes{container!=""} > 0) > 0.9
+            for: 10m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Kontener {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} używa {{ $value | humanizePercentage }} limitu pamięci'
+          - alert: ContainerCpuThrottled
+            expr: |
+              sum by (namespace, pod, container) (rate(container_cpu_cfs_throttled_periods_total{container!=""}[5m]))
+                / sum by (namespace, pod, container) (rate(container_cpu_cfs_periods_total{container!=""}[5m])) > 0.5
+            for: 15m
+            labels: { severity: info, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Kontener {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} dławiony przez limit CPU ({{ $value | humanizePercentage }})'
+
+      - name: kubernetes-storage
+        rules:
+          - alert: KubernetesVolumeOutOfDiskSpace
+            expr: kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.10
+            for: 2m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Wolumen {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}: zostało {{ $value | humanizePercentage }}'
+          - alert: KubernetesVolumeFullInFourDays
+            expr: |
+              kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.40
+                and predict_linear(kubelet_volume_stats_available_bytes[6h], 4 * 24 * 3600) < 0
+            for: 1h
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Wolumen {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} zapełni się w ciągu 4 dni'
+          - alert: KubernetesVolumeOutOfInodes
+            expr: kubelet_volume_stats_inodes_free / kubelet_volume_stats_inodes < 0.10
+            for: 5m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Wolumen {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}: brak i-węzłów'
+          - alert: KubernetesPersistentVolumeClaimPending
+            expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+            for: 5m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} czeka na wolumen'
+          - alert: KubernetesPersistentVolumeError
+            expr: kube_persistentvolume_status_phase{phase=~"Failed|Pending"} == 1
+            for: 5m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Wolumen {{ $labels.persistentvolume }} w stanie {{ $labels.phase }}'
+
+      - name: kubernetes-control-plane
+        rules:
+          - alert: KubernetesApiServerDown
+            expr: absent(up{job="apiserver"} == 1)
+            for: 2m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: Żaden API server nie odpowiada
+          - alert: KubernetesApiServerErrors
+            expr: |
+              sum by (instance) (rate(apiserver_request_total{code=~"5.."}[5m]))
+                / sum by (instance) (rate(apiserver_request_total[5m])) > 0.03
+            for: 10m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'API server {{ $labels.instance }}: {{ $value | humanizePercentage }} odpowiedzi 5xx'
+          - alert: KubernetesApiServerLatencyHigh
+            expr: histogram_quantile(0.99, sum by (instance, le) (rate(etcd_request_duration_seconds_bucket[5m]))) > 1
+            for: 10m
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'API server {{ $labels.instance }}: 99. percentyl zapytań do etcd {{ $value | humanizeDuration }}'
+              description: Wolne etcd (dysk masterów, sieć) spowalnia cały klaster.
+          - alert: KubernetesClientCertificateExpiresSoon
+            expr: |
+              apiserver_client_certificate_expiration_seconds_count > 0
+                and on (instance) histogram_quantile(0.01, sum by (instance, le) (rate(apiserver_client_certificate_expiration_seconds_bucket[5m]))) < 7 * 24 * 3600
+            labels: { severity: warning, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Klienci API servera {{ $labels.instance }} używają certyfikatów wygasających w ciągu tygodnia'
+          - alert: KubernetesSchedulerDown
+            expr: absent(up{job="kube-control-plane", component="kube-scheduler"} == 1)
+            for: 5m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: Żaden kube-scheduler nie działa – nowe pody nie będą uruchamiane
+          - alert: KubernetesControllerManagerDown
+            expr: absent(up{job="kube-control-plane", component="kube-controller-manager"} == 1)
+            for: 5m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: Żaden kube-controller-manager nie działa – deploymenty i węzły nie są obsługiwane
+          - alert: KubernetesNoLeader
+            expr: sum by (component) (leader_election_master_status{job="kube-control-plane"}) < 1
+            for: 5m
+            labels: { severity: critical, service: Kubernetes, notify: SBE-ADMIN }
+            annotations:
+              summary: '{{ $labels.component }} nie ma lidera'
+
+  platform.yml: |
+    groups:
+      - name: dns
+        rules:
+          - alert: CorednsPanic
+            expr: increase(coredns_panics_total[10m]) > 0
+            labels: { severity: warning, service: DNS, notify: SBE-ADMIN }
+            annotations:
+              summary: 'CoreDNS {{ $labels.pod }}{{ $labels.instance }}: panic'
+          - alert: CorednsServfailHigh
+            expr: |
+              sum by (job, instance) (rate(coredns_dns_responses_total{rcode="SERVFAIL"}[5m]))
+                / sum by (job, instance) (rate(coredns_dns_responses_total[5m])) > 0.05
+            for: 10m
+            labels: { severity: warning, service: DNS, notify: SBE-ADMIN }
+            annotations:
+              summary: 'DNS {{ $labels.instance }}: {{ $value | humanizePercentage }} odpowiedzi SERVFAIL'
+          - alert: CorednsUpstreamUnhealthy
+            expr: increase(coredns_forward_healthcheck_broken_total[10m]) > 0
+            labels: { severity: warning, service: DNS, notify: SBE-ADMIN }
+            annotations:
+              summary: 'DNS {{ $labels.instance }}: wszystkie serwery nadrzędne niedostępne'
+          - alert: KubernetesDnsDown
+            expr: absent(up{job="coredns"} == 1)
+            for: 2m
+            labels: { severity: critical, service: DNS, notify: SBE-ADMIN }
+            annotations:
+              summary: Żaden pod CoreDNS nie odpowiada – DNS w klastrze nie działa
+
+      - name: ceph
+        rules:
+          - alert: CephHealthWarning
+            expr: ceph_health_status == 1
+            for: 15m
+            labels: { severity: warning, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: Ceph w stanie HEALTH_WARN od 15 min
+              description: Szczegóły – ceph health detail (toolbox Rooka).
+          - alert: CephHealthError
+            expr: ceph_health_status == 2
+            for: 5m
+            labels: { severity: critical, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: Ceph w stanie HEALTH_ERR
+          - alert: CephMonitorOutOfQuorum
+            expr: ceph_mon_quorum_status == 0
+            for: 5m
+            labels: { severity: critical, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Monitor Ceph {{ $labels.ceph_daemon }} poza kworum'
+          - alert: CephOsdDown
+            expr: ceph_osd_up == 0
+            for: 5m
+            labels: { severity: critical, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'OSD {{ $labels.ceph_daemon }} nie działa'
+          - alert: CephOsdOut
+            expr: ceph_osd_in == 0
+            for: 5m
+            labels: { severity: warning, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'OSD {{ $labels.ceph_daemon }} wyłączony z klastra (out)'
+          - alert: CephOsdNearFull
+            expr: ceph_osd_stat_bytes_used / ceph_osd_stat_bytes > 0.75
+            for: 10m
+            labels: { severity: warning, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'OSD {{ $labels.ceph_daemon }} zajęty w {{ $value | humanizePercentage }}'
+          - alert: CephOsdFull
+            expr: ceph_osd_stat_bytes_used / ceph_osd_stat_bytes > 0.85
+            for: 5m
+            labels: { severity: critical, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'OSD {{ $labels.ceph_daemon }} zajęty w {{ $value | humanizePercentage }} – zapisy zaraz się zatrzymają'
+          - alert: CephOsdHighLatency
+            expr: ceph_osd_commit_latency_ms > 500
+            for: 10m
+            labels: { severity: warning, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'OSD {{ $labels.ceph_daemon }}: opóźnienie zapisu {{ $value }} ms'
+          - alert: CephPoolNearFull
+            expr: ceph_pool_percent_used > 0.75
+            for: 10m
+            labels: { severity: warning, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Pula Ceph {{ $labels.pool_id }} zajęta w {{ $value | humanizePercentage }}'
+          - alert: CephClusterNearFull
+            expr: ceph_cluster_total_used_raw_bytes / ceph_cluster_total_bytes > 0.75
+            for: 10m
+            labels: { severity: warning, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Klaster Ceph zajęty w {{ $value | humanizePercentage }}'
+          - alert: CephPgsInactive
+            expr: ceph_pg_total - ceph_pg_active > 0
+            for: 5m
+            labels: { severity: critical, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: '{{ $value }} grup PG nieaktywnych – część danych niedostępna'
+          - alert: CephPgsDegraded
+            expr: ceph_pg_degraded > 0 or ceph_pg_undersized > 0
+            for: 30m
+            labels: { severity: warning, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Ceph: {{ $value }} grup PG bez pełnej liczby kopii od 30 min'
+          - alert: CephPgsInconsistent
+            expr: ceph_pg_inconsistent > 0 or ceph_pg_down > 0 or ceph_pg_incomplete > 0
+            for: 5m
+            labels: { severity: critical, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Ceph: grupy PG niespójne, niedostępne lub niekompletne ({{ $value }})'
+          - alert: CephSlowOps
+            expr: ceph_healthcheck_slow_ops > 0
+            for: 5m
+            labels: { severity: warning, service: Ceph, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Ceph: {{ $value }} wolnych operacji'
+
+      - name: istio
+        rules:
+          - alert: IstioWorkloadCertificateExpiring
+            expr: istio_agent_cert_expiry_seconds < 3600
+            for: 5m
+            labels: { severity: warning, service: Istio, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Certyfikat mesh dla {{ $labels.namespace }}/{{ $labels.pod }} wygasa w ciągu godziny – rotacja nie działa'
+
+      - name: argocd
+        rules:
+          - alert: ArgocdApplicationOutOfSync
+            expr: argocd_app_info{sync_status!="Synced"} == 1
+            for: 30m
+            labels: { severity: warning, service: ArgoCD, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Aplikacja ArgoCD {{ $labels.name }} niezsynchronizowana ({{ $labels.sync_status }}) od 30 min'
+          - alert: ArgocdApplicationUnhealthy
+            expr: argocd_app_info{health_status!~"Healthy|Progressing"} == 1
+            for: 15m
+            labels: { severity: warning, service: ArgoCD, notify: SBE-ADMIN }
+            annotations:
+              summary: 'Aplikacja ArgoCD {{ $labels.name }} w stanie {{ $labels.health_status }}'
+          - alert: ArgocdClusterConnectionLost
+            expr: argocd_cluster_connection_status == 0
+            for: 5m
+            labels: { severity: critical, service: ArgoCD, notify: SBE-ADMIN }
+            annotations:
+              summary: 'ArgoCD nie ma połączenia z klastrem {{ $labels.server }}'

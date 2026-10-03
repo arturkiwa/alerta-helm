@@ -1,0 +1,22 @@
+# Demo Alertmanager: every alert goes to Alerta Next (through its frontend, like from outside).
+# The API key comes from secrets/alerta-token – put the key created in Alerta Next there (docs/deployment).
+route:
+  receiver: alerta-next
+  group_by: [alertname, cluster]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 1h
+  routes:
+    - matchers: [alertname = "Watchdog"]
+      receiver: alerta-next
+      group_wait: 0s
+      repeat_interval: 1m
+receivers:
+  - name: alerta-next
+    webhook_configs:
+      - url: http://frontend:8080/api/v1/ingest/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/alerta-token

@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-to-alertmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:          # ← Alertmanager running in this cluster …
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+        # - ipBlock:                  # … or outside of it
+        #     cidr: 10.20.30.40/32
+      ports:
+        - { protocol: TCP, port: 9093 }

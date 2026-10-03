@@ -1,0 +1,13 @@
+# Lets a Prometheus outside this namespace scrape backend metrics (port 8081, /actuator/prometheus).
+# Discovery by annotations on the pod ("kubernetes-pods" job) and on a metrics Service ("kubernetes-service-endpoints").
+# Adjust the namespace label in network-policy.yaml to where the cluster's Prometheus runs.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: pod-annotations.yaml
+resources:
+  - metrics-service.yaml
+  - network-policy.yaml
+  - peer-authentication.yaml
+  - authorization-policy.yaml
+# With the Prometheus Operator, additionally: servicemonitor.yaml (not included by default – CRD may be absent).

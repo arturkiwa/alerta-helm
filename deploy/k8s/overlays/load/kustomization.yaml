@@ -1,0 +1,77 @@
+# Load test only: the same release in its own namespace "alerta-load" with its own database, so tens of thousands of
+# synthetic alerts and the append-only audit entries of the test never reach the real test instance. No gateway (no
+# fixed NodePorts); the load generator talks to the frontend Service inside the mesh, like the gateway would.
+# Applied by hand, outside ArgoCD, and deleted after the test (see ../../../../load/README.md):
+#   kubectl apply -k deploy/k8s/overlays/load   …   kubectl delete namespace alerta-load
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: alerta-load
+resources:
+  - ../../base
+  - load-generator.yaml
+components:
+  - ../../components/prometheus-scrape # the test Prometheus scrapes this instance too (server-side latencies)
+configMapGenerator:
+  - name: alerta-next-backend-config
+    behavior: merge
+    files:
+      - config/environment.yml
+images:
+  - name: cr.artbit.com.pl/mydocker/alerta-next-backend
+    newTag: load-c9c5211
+    digest: sha256:d21a3891fd516521bc91f75fc3d28bd508031cf4efeabdea176c0b0043a430c5
+  - name: cr.artbit.com.pl/mydocker/alerta-next-frontend
+    newTag: load-32ae8d5
+    digest: sha256:34a617d24bbbe7f25569e64fb3a7c5d00a9dc10428dc34f1309702d87319a5a4
+  - name: postgres
+    newTag: 18-alpine
+patches:
+  # No gateway in this namespace.
+  - patch: |-
+      $patch: delete
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata: { name: alerta-next-gateway }
+  - patch: |-
+      $patch: delete
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata: { name: alerta-next }
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: { name: alerta-next-gateway-nodeport }
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: { name: alerta-next-gateway-options }
+  # Mesh identities live in this namespace; the load generator takes the gateway's place in front of the frontend.
+  - target: { kind: AuthorizationPolicy, name: frontend }
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/from/0/source/principals
+        value: [cluster.local/ns/alerta-load/sa/load-generator]
+  - target: { kind: AuthorizationPolicy, name: backend }
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/from/0/source/principals
+        value: [cluster.local/ns/alerta-load/sa/alerta-next-frontend]
+  - target: { kind: AuthorizationPolicy, name: db }
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/from/0/source/principals
+        value: [cluster.local/ns/alerta-load/sa/alerta-next-backend]
+  # Plain HTTP inside the cluster: the session and CSRF cookies must not be "Secure" for the generator to send them.
+  - target: { kind: Deployment, name: alerta-next-backend }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: SESSION_COOKIE_SECURE, value: "false" }
+  # Which statements cost the most under load (pg_stat_statements; the extension is created by hand after the start).
+  - target: { kind: StatefulSet, name: alerta-next-db }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args
+        value: [-c, shared_preload_libraries=pg_stat_statements, -c, pg_stat_statements.track=all]

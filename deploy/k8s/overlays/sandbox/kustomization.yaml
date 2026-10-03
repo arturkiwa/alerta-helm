@@ -1,0 +1,96 @@
+# Sandbox in a plain Kubernetes: no service mesh, no Cilium, TLS terminated on an external load balancer (F5) that
+# forwards plain HTTP to port 80 of the workers (NGINX ingress controller).
+# Lines marked ← need your values.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ingress.yaml
+  - network-policies.yaml
+configMapGenerator:
+  - name: alerta-next-backend-config
+    behavior: merge
+    files:
+      - config/environment.yml
+images:
+  - name: cr.artbit.com.pl/mydocker/alerta-next-backend
+    newName: artifactory.example.com/alerta-next/alerta-next-backend   # ← your registry
+    newTag: 0.10.0
+  - name: cr.artbit.com.pl/mydocker/alerta-next-frontend
+    newName: artifactory.example.com/alerta-next/alerta-next-frontend  # ← your registry
+    newTag: 0.10.0
+  - name: postgres
+    newName: postgres                                                    # ← a mirror, if Docker Hub is not reachable
+    newTag: 18-alpine
+patches:
+  # No Istio: its gateway, routes and policies do not exist here.
+  - patch: |-
+      $patch: delete
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata: { name: alerta-next-gateway }
+  - patch: |-
+      $patch: delete
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata: { name: alerta-next }
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: { name: alerta-next-gateway-nodeport }
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: { name: alerta-next-gateway-options }
+  - patch: |-
+      $patch: delete
+      apiVersion: security.istio.io/v1
+      kind: PeerAuthentication
+      metadata: { name: strict-mtls }
+  - patch: |-
+      $patch: delete
+      apiVersion: security.istio.io/v1
+      kind: AuthorizationPolicy
+      metadata: { name: frontend }
+  - patch: |-
+      $patch: delete
+      apiVersion: security.istio.io/v1
+      kind: AuthorizationPolicy
+      metadata: { name: backend }
+  - patch: |-
+      $patch: delete
+      apiVersion: security.istio.io/v1
+      kind: AuthorizationPolicy
+      metadata: { name: db }
+  # No Cilium: plain NetworkPolicies only (DNS rule in network-policies.yaml).
+  - patch: |-
+      $patch: delete
+      apiVersion: cilium.io/v2
+      kind: CiliumNetworkPolicy
+      metadata: { name: allow-dns }
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata: { name: allow-ambient-probes }
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata: { name: gateway }
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata: { name: frontend }
+  - target: { kind: Namespace, name: alerta-next }
+    patch: |-
+      - op: remove
+        path: /metadata/labels/istio.io~1dataplane-mode
+  # The database disk: the cluster's default storage class (set storageClassName to choose another).
+  - target: { kind: StatefulSet, name: alerta-next-db }
+    patch: |-
+      - op: remove
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName

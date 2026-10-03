@@ -1,0 +1,14 @@
+{{- if and .Values.internalCA.certificate (not .Values.internalCA.existingConfigMap) }}
+{{- if not (contains "BEGIN CERTIFICATE" .Values.internalCA.certificate) }}
+{{- fail "internalCA.certificate must be a PEM certificate (-----BEGIN CERTIFICATE-----)" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "alerta-next.caConfigMap" . }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+data:
+  ca.crt: |
+    {{- .Values.internalCA.certificate | trim | nindent 4 }}
+{{- end }}

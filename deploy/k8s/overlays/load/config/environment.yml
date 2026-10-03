@@ -1,0 +1,6 @@
+# Load test instance: no Alertmanager (silences are not part of the load test), logs tagged as "load".
+logging:
+  structured:
+    ecs:
+      service:
+        environment: load

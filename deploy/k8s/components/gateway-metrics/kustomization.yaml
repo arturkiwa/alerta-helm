@@ -1,0 +1,7 @@
+# Lets a Prometheus outside this namespace scrape the Istio gateway's own metrics (port 15020, /stats/prometheus;
+# the pod carries the prometheus.io annotations already). The gateway is not in the mesh (dataplane-mode none),
+# so a NetworkPolicy is all it takes. Adjust the namespace label to where Prometheus runs.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - network-policy.yaml

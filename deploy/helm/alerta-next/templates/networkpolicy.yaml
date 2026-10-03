@@ -1,0 +1,118 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- /* Everything denied, then only: DNS, ingress -> frontend -> backend -> internal DB, metrics, extraEgress. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "alerta-next.fullname" . }}-default-deny
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - ports:                    # DNS to any address (node-local DNS caches are not pods)
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "alerta-next.fullname" . }}-frontend
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "alerta-next.selector" (list . "frontend") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ protocol: TCP, port: 8080 }]
+      {{- with $np.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "alerta-next.selector" (list . "backend") | nindent 14 }}
+      ports: [{ protocol: TCP, port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "alerta-next.fullname" . }}-backend
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "alerta-next.selector" (list . "backend") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "alerta-next.selector" (list . "frontend") | nindent 14 }}
+      ports: [{ protocol: TCP, port: 8080 }]
+    - ports: [{ protocol: TCP, port: 8081 }]
+      {{- with $np.metricsFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    {{- if .Values.database.internal.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "alerta-next.selector" (list . "db") | nindent 14 }}
+      ports: [{ protocol: TCP, port: 5432 }]
+    {{- end }}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- if .Values.database.internal.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "alerta-next.fullname" . }}-db
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "alerta-next.selector" (list . "db") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "alerta-next.selector" (list . "backend") | nindent 14 }}
+        - podSelector:            # nightly backup, and a restore pod started with the same labels (runbook)
+            matchLabels:
+              {{- include "alerta-next.selector" (list . "db-backup") | nindent 14 }}
+      ports: [{ protocol: TCP, port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "alerta-next.fullname" . }}-db-backup
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "alerta-next.selector" (list . "db-backup") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "alerta-next.selector" (list . "db") | nindent 14 }}
+      ports: [{ protocol: TCP, port: 5432 }]
+{{- end }}
+{{- end }}

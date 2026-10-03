@@ -1,0 +1,24 @@
+# Single sign-on (OpenID Connect, e.g. the organization's Keycloak). In the overlay:
+#   components:
+#     - ../../components/sso
+#     - ../../components/internal-ca            # if the provider's certificate is issued by the organization's CA
+# config/environment.yml:
+#   alerta:
+#     auth:
+#       oidc:
+#         enabled: true
+#         issuer: https://sso.example.com/realms/example
+#         client-id: alerta-next
+#         ca-file: /etc/alerta/ca/internal-ca.crt  # with components/internal-ca
+#       local:
+#         mode: BREAK_GLASS_ONLY               # local accounts only for emergency access
+#         break-glass-users: [ … ]
+# Secret alerta-next-oidc, key client-secret (on production from Vault). Set the provider's address below.
+# In the provider: client "alerta-next" (confidential, standard flow), redirect URI
+# https://<host>/api/v1/auth/oidc/callback, post-logout redirect https://<host>/login*, a "groups" claim.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - network-policy.yaml
+patches:
+  - path: backend-secret-patch.yaml

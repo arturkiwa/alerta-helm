@@ -1,0 +1,29 @@
+$patch: delete
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alerta-next-db
+---
+$patch: delete
+apiVersion: v1
+kind: Service
+metadata:
+  name: alerta-next-db
+---
+$patch: delete
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alerta-next-db
+---
+$patch: delete
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db
+---
+$patch: delete
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: db

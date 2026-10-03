@@ -1,0 +1,120 @@
+# Single-instance PostgreSQL for test environments. Production: an operator with HA and backups (e.g. CloudNativePG).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alerta-next-db
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alerta-next-db
+  labels:
+    app.kubernetes.io/name: alerta-next-db
+spec:
+  selector:
+    app.kubernetes.io/name: alerta-next-db
+  ports:
+    - name: tcp-postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alerta-next-db
+  labels:
+    app.kubernetes.io/name: alerta-next-db
+spec:
+  serviceName: alerta-next-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alerta-next-db
+        app.kubernetes.io/component: database
+    spec:
+      serviceAccountName: alerta-next-db
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70 # postgres user in the alpine image
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:18-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: alerta
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: alerta-next-db
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alerta-next-db
+                  key: password
+            - name: POSTGRES_INITDB_ARGS
+              value: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          startupProbe:
+            exec:
+              command: [sh, -c, 'pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d alerta']
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [sh, -c, 'pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d alerta']
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [sh, -c, 'pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d alerta']
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+  volumeClaimTemplates:
+    - apiVersion: v1 # explicit, otherwise GitOps tools report a permanent diff
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: ceph-block
+        volumeMode: Filesystem
+        resources:
+          requests:
+            storage: 10Gi

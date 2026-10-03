@@ -1,0 +1,69 @@
+# Local test stack only. Kubernetes manifests come later; secrets here are throwaway dev values.
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: alerta
+      POSTGRES_USER: alerta
+      POSTGRES_PASSWORD: dev-only-password
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alerta -d alerta"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ../backend
+    image: alerta-next-backend:dev
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/alerta
+      DB_USER: alerta
+      DB_PASSWORD: dev-only-password
+      # Plain HTTP on localhost; behind the TLS ingress this stays at its default (true).
+      SESSION_COOKIE_SECURE: "false"
+      ALERTMANAGER_URL: http://alertmanager:9093
+      # "Resolved" at once: the e2e scenarios check resolution right away (the grace window has backend tests)
+      ALERTA_ALERTS_RESOLVEGRACE: 0s
+      # The daily e-mail report goes to Mailpit (what arrived: http://127.0.0.1:8025)
+      ALERTA_MAIL_SMARTHOST: mailpit:1025
+      ALERTA_MAIL_FROM: alerta@localhost
+      ALERTA_MAIL_CONSOLEURL: http://127.0.0.1:8087
+      ALERTA_MAIL_ALLOWEDDOMAINS: example.com
+      # E-mail notifications by rules; short waits so e2e sees them within seconds
+      ALERTA_NOTIFICATIONS_ENABLED: "true"
+      ALERTA_NOTIFICATIONS_BATCHWINDOW: 10s
+      ALERTA_NOTIFICATIONS_MININTERVAL: 10s
+      ALERTA_NOTIFICATIONS_CHECKINTERVAL: 5s
+      # Links to other tools (Administration → Labels) may point only here
+      ALERTA_LINKS_ALLOWEDHOSTS: grafana.example.com,*.logs.example.com
+    depends_on:
+      db:
+        condition: service_healthy
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager/secrets:/etc/alertmanager/secrets:ro
+    ports:
+      - "127.0.0.1:9093:9093"
+
+  mailpit:
+    image: axllent/mailpit:v1.31.3
+    ports:
+      - "127.0.0.1:8025:8025"
+
+  frontend:
+    build: ../frontend
+    image: alerta-next-frontend:dev
+    environment:
+      BACKEND_URL: http://backend:8080
+    ports:
+      - "127.0.0.1:8087:8080"
+    depends_on:
+      - backend
+
+volumes:
+  db-data:

@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-external-db
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8 # ← address range of the database
+      ports:
+        - { protocol: TCP, port: 5432 }

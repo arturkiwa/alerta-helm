@@ -1,0 +1,60 @@
+# Identity-based rules enforced by ztunnel (L4) on top of the IP-based NetworkPolicies.
+# Principals are SPIFFE identities derived from Kubernetes ServiceAccounts.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: frontend
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-frontend
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/alerta-next/sa/alerta-next-gateway-istio]
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: backend
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/alerta-next/sa/alerta-next-frontend]
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: db
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-db
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/alerta-next/sa/alerta-next-backend]
+      to:
+        - operation:
+            ports: ["5432"]

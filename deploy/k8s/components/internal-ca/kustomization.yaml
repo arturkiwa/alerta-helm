@@ -1,0 +1,30 @@
+# Trust the organization's internal CA for outgoing TLS (Alertmanager today; later Teams, Jira, Zabbix, Keycloak) without
+# building it into the image: the ConfigMap alerta-next-ca is mounted at /etc/alerta/ca. A CA certificate is public,
+# so a ConfigMap (not a Secret) is enough. In the overlay:
+#
+#   components:
+#     - ../../components/internal-ca
+#   configMapGenerator:
+#     - name: alerta-next-ca
+#       files:
+#         - internal-ca.crt            # PEM, one or more certificates (root + intermediate)
+#
+# and point each integration at it in config/environment.yml (host names are still verified):
+#
+#   alerta:
+#     integrations:
+#       alertmanager:
+#         ca-file: /etc/alerta/ca/internal-ca.crt
+#
+# The same file can verify the database: DB_URL …?sslmode=verify-full&sslrootcert=/etc/alerta/ca/internal-ca.crt
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: backend-ca-patch.yaml
+# A fixed name (no content hash): kustomize does not rename the volume of a component's patch after a ConfigMap
+# generated in the overlay. After replacing the certificate, restart the backend (a new rollout picks it up).
+configMapGenerator:
+  - name: alerta-next-ca
+    behavior: merge
+    options:
+      disableNameSuffixHash: true

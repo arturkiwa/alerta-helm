@@ -1,0 +1,144 @@
+# Network policies: everything denied by default, then only what the application needs – DNS, ingress → frontend
+# → backend → database, Prometheus → backend metrics (8081), backend → Alertmanager API (9093, for silences).
+# If your cluster does not enforce NetworkPolicies, they are simply ignored.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+  name: backend
+  namespace: alerta-next
+spec:
+  egress:
+  - ports:
+    - port: 5432
+      protocol: TCP
+    - port: 15008
+      protocol: TCP
+    to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: alerta-next-db
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: alerta-next-frontend
+    ports:
+    - port: 8080
+      protocol: TCP
+    - port: 15008
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+  name: db
+  namespace: alerta-next
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: alerta-next-backend
+    ports:
+    - port: 5432
+      protocol: TCP
+    - port: 15008
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-db
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+  name: default-deny
+  namespace: alerta-next
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  podSelector: {}
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-metrics
+spec:
+  ingress:
+  - ports:
+    - port: 8081
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-to-alertmanager
+spec:
+  egress:
+  - ports:
+    - port: 9093
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-from-ingress
+spec:
+  egress:
+  - ports:
+    - port: 8080
+      protocol: TCP
+    to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: alerta-next-backend
+  ingress:
+  - ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-frontend
+  policyTypes:
+  - Ingress
+  - Egress

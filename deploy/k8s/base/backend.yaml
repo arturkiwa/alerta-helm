@@ -1,0 +1,162 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alerta-next-backend
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alerta-next-backend
+  labels:
+    app.kubernetes.io/name: alerta-next-backend
+spec:
+  selector:
+    app.kubernetes.io/name: alerta-next-backend
+  # The management port (8081: health, metrics) is deliberately not part of the Service.
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alerta-next-backend
+  labels:
+    app.kubernetes.io/name: alerta-next-backend
+spec:
+  # Two replicas: a rollout, a node drain or a crashed pod never takes the console down (PodDisruptionBudget in
+  # availability.yaml). A new pod must be ready before an old one goes.
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alerta-next-backend
+        app.kubernetes.io/component: backend
+    spec:
+      serviceAccountName: alerta-next-backend
+      automountServiceAccountToken: false
+      # On different nodes where possible.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerta-next-backend
+      terminationGracePeriodSeconds: 45
+      imagePullSecrets:
+        - name: alerta-next-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: cr.artbit.com.pl/mydocker/alerta-next-backend
+          lifecycle:
+            # Let the Service and the gateway stop sending new requests before the process starts shutting down.
+            preStop:
+              sleep:
+                seconds: 5
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 8081
+          env:
+            - name: SPRING_CONFIG_ADDITIONAL_LOCATION
+              value: file:/etc/alerta/
+            # Database – see README "Baza danych" for an external PostgreSQL, TLS, schema, migration user.
+            - name: DB_URL
+              value: jdbc:postgresql://alerta-next-db:5432/alerta
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: alerta-next-db
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alerta-next-db
+                  key: password
+            # Optional: bearer token for the central Alertmanager API (silences).
+            # Login to Alertmanager (Secret alerta-next-alertmanager, outside git): a bearer token, or a username and
+            # password (basic auth, e.g. the test Alertmanager's account "alerta"). Missing keys = no login.
+            - name: ALERTMANAGER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alerta-next-alertmanager
+                  key: token
+                  optional: true
+            - name: ALERTMANAGER_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: alerta-next-alertmanager
+                  key: username
+                  optional: true
+            - name: ALERTMANAGER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alerta-next-alertmanager
+                  key: password
+                  optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              # Headroom for the break-glass CLI (alerta-admin), which starts a second, small JVM in this container.
+              memory: 1536Mi
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 15
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: logs
+              mountPath: /var/log/alerta
+            - name: config
+              mountPath: /etc/alerta
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: logs                # JSON log for ELK (logging.file.name in the ConfigMap)
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: config
+          configMap:
+            name: alerta-next-backend-config

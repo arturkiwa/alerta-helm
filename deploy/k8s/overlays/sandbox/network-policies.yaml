@@ -1,0 +1,36 @@
+# Plain NetworkPolicies replacing the mesh / Cilium ones of the base (default deny stays).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    # DNS to any address: the cluster DNS may be a pod in kube-system or a node-local cache on the host network, and
+    # CNIs differ in how a policy can name the latter (Cilium: not by ipBlock). Port 53 only.
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Traffic from the F5 arrives through the NGINX ingress controller – the frontend port is open, the backend
+# and the database stay reachable only from their callers (base policies).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-from-load-balancer
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-frontend
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerta-next-backend
+      ports:
+        - { protocol: TCP, port: 8080 }

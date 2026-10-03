@@ -1,0 +1,12 @@
+# Namespace "alerta-next" with the Pod Security "restricted" profile (the images run as non-root with a read-only
+# root filesystem). To use another namespace, change "namespace: alerta-next" in ALL files.
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+  name: alerta-next

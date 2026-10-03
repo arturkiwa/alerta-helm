@@ -1,0 +1,237 @@
+{{- $name := printf "%s-backend" (include "alerta-next.fullname" .) }}
+{{- $v := .Values.backend }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+    {{- include "alerta-next.selector" (list . "backend") | nindent 4 }}
+spec:
+  selector:
+    {{- include "alerta-next.selector" (list . "backend") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: management          # health + metrics; never routed by the ingress
+      port: 8081
+      targetPort: management
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+    {{- include "alerta-next.selector" (list . "backend") | nindent 4 }}
+spec:
+  replicas: {{ $v.replicas }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels:
+      {{- include "alerta-next.selector" (list . "backend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "alerta-next.selector" (list . "backend") | nindent 8 }}
+        app.kubernetes.io/component: backend
+        {{- with $v.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        checksum/ca: {{ include (print $.Template.BasePath "/ca.yaml") . | sha256sum }}
+        checksum/csi: {{ include (print $.Template.BasePath "/secret-provider-class.yaml") . | sha256sum }}
+        {{- if .Values.metrics.podAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: /actuator/prometheus
+        {{- end }}
+        {{- with $v.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      {{- with $v.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: backend
+          image: {{ include "alerta-next.image" (list . .Values.image.backend) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: management, containerPort: 8081 }
+          env:
+            - name: SPRING_CONFIG_ADDITIONAL_LOCATION
+              value: file:/etc/alerta/config/
+            - name: DB_URL
+              value: {{ include "alerta-next.dbUrl" . | quote }}
+            {{- if not (include "alerta-next.csi" .) }}
+            {{- /* secrets.mode=csi: these come as files from /etc/alerta/secrets instead */}}
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: {{ include "alerta-next.dbSecret" . }}, key: username } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "alerta-next.dbSecret" . }}, key: password } }
+            - name: DB_MIGRATION_USER
+              valueFrom: { secretKeyRef: { name: {{ include "alerta-next.dbSecret" . }}, key: migration-username, optional: true } }
+            - name: DB_MIGRATION_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "alerta-next.dbSecret" . }}, key: migration-password, optional: true } }
+            {{- with include "alerta-next.alertmanagerSecret" . }}
+            - name: ALERTMANAGER_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: token, optional: true } }
+            - name: ALERTMANAGER_USERNAME
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: username, optional: true } }
+            - name: ALERTMANAGER_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: password, optional: true } }
+            {{- end }}
+            {{- with include "alerta-next.mailSecret" . }}
+            - name: MAIL_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: password, optional: true } }
+            {{- end }}
+            {{- range .Values.alertmanagers }}
+            {{- $secret := include "alerta-next.namedAmSecret" (list $ .) }}
+            {{- if $secret }}
+            {{- $env := include "alerta-next.amEnv" .name }}
+            - name: {{ $env }}_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $secret }}, key: token, optional: true } }
+            - name: {{ $env }}_USERNAME
+              valueFrom: { secretKeyRef: { name: {{ $secret }}, key: username, optional: true } }
+            - name: {{ $env }}_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $secret }}, key: password, optional: true } }
+            {{- end }}
+            {{- end }}
+            {{- if .Values.oidc.enabled }}
+            - name: OIDC_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ include "alerta-next.oidcSecret" . }}, key: client-secret } }
+            {{- end }}
+            {{- end }}
+            - name: DB_SCHEMA
+              value: {{ .Values.database.schema | quote }}
+            - name: DB_MIGRATE
+              value: {{ .Values.database.migrate | quote }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.database.poolSize | quote }}
+            - name: SESSION_COOKIE_SECURE
+              value: {{ .Values.session.cookieSecure | quote }}
+            {{- with $v.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:                 # first start creates the schema: up to 3 minutes
+            httpGet: { path: /actuator/health/liveness, port: management }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: management }
+            periodSeconds: 15
+            failureThreshold: 4
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: management }
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              sleep: { seconds: 5 }
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/alerta/config, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            - { name: logs, mountPath: /var/log/alerta }
+            {{- if include "alerta-next.hasCA" . }}
+            - { name: ca, mountPath: /etc/alerta/ca, readOnly: true }
+            {{- end }}
+            {{- if include "alerta-next.csi" . }}
+            - { name: secrets, mountPath: /etc/alerta/secrets, readOnly: true }
+            {{- end }}
+            {{- with $v.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- with $v.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap: { name: {{ include "alerta-next.fullname" . }}-config }
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        - name: logs
+          emptyDir: { sizeLimit: 512Mi }
+        {{- if include "alerta-next.hasCA" . }}
+        - name: ca
+          configMap: { name: {{ include "alerta-next.caConfigMap" . }} }
+        {{- end }}
+        {{- if include "alerta-next.csi" . }}
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: {{ include "alerta-next.spcBackend" . }} }
+        {{- end }}
+        {{- with $v.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if $v.spreadAcrossNodes }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "alerta-next.selector" (list . "backend") | nindent 14 }}
+      {{- end }}
+      {{- with $v.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $v.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ $v.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "alerta-next.selector" (list . "backend") | nindent 6 }}
+{{- end }}

@@ -419,6 +419,8 @@ zob. [6.2](#62-zewnętrzny-lub-centralny-postgresql).
 ### 4.8 Aktualizacja i usunięcie
 - **Aktualizacja**: zmień tagi obrazów (backend i frontend na tę samą wersję) i `kubectl apply -f .`. Pody są
   wymieniane po jednym, bez przerwy; migracje bazy uruchamiają się przy starcie i są zgodne wstecz z poprzednią wersją.
+  Co gwarantujemy między wersjami (konfiguracja, API, metryki, logi, przeskok o kilka wersji, wycofanie):
+  [polityka kompatybilności](../compatibility-policy.md).
 - **Usunięcie**: `kubectl delete namespace alerta-next` (usuwa wszystko, łącznie z wolumenem bazy).
 
 ### 4.9 Gdy coś nie działa
@@ -473,31 +475,49 @@ helm upgrade --install alerta-next deploy/helm/alerta-next -n alerta-next -f my-
 Chart montuje go jako `/etc/alerta/ca/ca.crt` i używa dla API Alertmanagera, SSO oraz – przy
 `database.external.sslMode: verify-full` – bazy.
 
-**Najczęściej używane parametry**
+**Wszystkie parametry** (szczegóły i przykłady w komentarzach [`values.yaml`](../../deploy/helm/alerta-next/values.yaml))
 
 | Parametr | Znaczenie |
 |---|---|
-| `image.registry`, `image.tag`, `image.pullSecrets` | własny rejestr, wersja (puste = `appVersion` charta), Secret do pobierania |
-| `secrets.mode` (`values` / `existing` / `csi`) | skąd biorą się sekrety ([5.1](#51-helm-skąd-biorą-się-sekrety-secretsmode)) |
-| `database.password` / `database.existingSecret` / `secrets.csi.vault.*` | login do bazy |
-| `database.internal.enabled`, `.storageClass`, `.size` | PostgreSQL w klastrze i jego wolumen |
-| `database.internal.backup.enabled`, `.schedule`, `.keep`, `.storageClass`, `.size` | nocny zrzut bazy wbudowanej na osobny wolumen ([runbook](backup-runbook.pl.md)) |
-| `database.external.host`, `.port`, `.name`, `.sslMode` (albo `.url`), `database.schema`, `database.migrate` | baza zewnętrzna ([6.2](#62-zewnętrzny-lub-centralny-postgresql)) |
-| `internalCA.*` | własne CA (wyżej) |
-| `alertmanager.url`, `.token` / `.username`+`.password` / `.existingSecret` | wyciszenia z konsoli |
-| `alertmanagers[]` (`name`, `url`, logowanie jak wyżej) | kolejne Alertmanagery ([8.2](#82-kilka-alertmanagerów)) |
-| `oidc.enabled`, `.issuer`, `.clientId`, `.clientSecret` / `.existingSecret`, `.claims` | logowanie jednokrotne |
-| `config` | dowolne ustawienie aplikacji ([sekcja 7](#7-konfiguracja)), wygrywa ze wszystkim |
-| `mail.*` | raport dzienny e-mail: `smarthost`, `from`, `hello`, `requireTls`, `username` + hasło, `consoleUrl`, **`allowedDomains` (wymagane)** |
-| `notifications.*` | powiadomienia e-mail według reguł: `enabled` (wymaga `mail.smarthost`), `batchWindow`, `minInterval` |
 | `fullnameOverride` | nazwa bazowa obiektów (np. `alerta` → `alerta-backend`, `alerta-db`); pusta = nazwa instalacji |
-| `ingress.host`, `.className`, `.annotations`, `.tls.*` | dostęp |
+| `image.registry`, `.backend`, `.frontend` | rejestr i nazwy obrazów (własne lustro rejestru, 4.6) |
+| `image.tag`, `.pullPolicy`, `.pullSecrets` | wersja (puste = `appVersion` charta; backend i frontend zawsze ta sama), polityka pobierania, Secrety do pobierania |
+| `secrets.mode` (`values` / `existing` / `csi`) | skąd biorą się sekrety ([5.1](#51-helm-skąd-biorą-się-sekrety-secretsmode)) |
+| `secrets.csi.vault.address`, `.authPath`, `.role`, `.namespace`, `.objects` | Vault przez CSI: adres, ścieżka metody Kubernetes, rola, namespace Vault Enterprise, gdzie leży każdy sekret ([5.2](#52-vault-z-secrets-store-csi-driver-krok-po-kroku)) |
+| `secrets.csi.secretProviderClass` | własna `SecretProviderClass` / inny provider CSI zamiast Vaulta (przy Vault puste) |
+| `database.username`, `.password` / `.existingSecret` | login aplikacji do bazy (przy bazie w klastrze także superużytkownik, ustawiany tylko przy pierwszym starcie) |
+| `database.migrationUsername`, `.migrationPassword` | osobne konto do migracji schematu (baza zewnętrzna, [6.2](#62-zewnętrzny-lub-centralny-postgresql)); oba albo żadne |
+| `database.internal.enabled`, `.image`, `.storageClass`, `.size` | PostgreSQL w klastrze (jeden pod, bez HA) i jego wolumen |
+| `database.internal.resources`, `.nodeSelector`, `.tolerations`, `.affinity` | zasoby i rozmieszczenie poda bazy |
+| `database.internal.backup.enabled`, `.schedule`, `.keep`, `.storageClass`, `.size`, `.resources` | nocny zrzut bazy wbudowanej na osobny wolumen ([runbook](backup-runbook.pl.md)); `schedule` w strefie czasowej klastra |
+| `database.external.host`, `.port`, `.name`, `.sslMode` (albo `.url`) | baza zewnętrzna ([6.2](#62-zewnętrzny-lub-centralny-postgresql)); `url` wygrywa z resztą |
+| `database.schema`, `database.migrate` | schemat Alerty Next; `false` = migracje nakłada DBA |
+| `database.poolSize` | połączenia na replikę backendu (domyślnie 20); `max_connections` ≥ (repliki + 1) × `poolSize` |
+| `internalCA.certificate` / `.existingConfigMap` | własne CA (wyżej) |
+| `alertmanager.url`, `.token` / `.username`+`.password` / `.existingSecret` | Alertmanager `default` – wyciszenia z konsoli. Przestarzałe obok `alertmanagers[]`, działa do 2.0 ([polityka kompatybilności](../compatibility-policy.md)) |
+| `alertmanagers[]` (`name`, `url`, logowanie jak wyżej) | kolejne Alertmanagery ([8.2](#82-kilka-alertmanagerów)); Vault CSI: obiekty `ALERTMANAGER_<NAZWA>_TOKEN` itd. |
+| `mail.smarthost`, `.from`, `.hello`, `.requireTls`, `.username`, `.password` / `.existingSecret` | poczta wychodząca (nazwy jak `smtp_*` Alertmanagera); Vault CSI: obiekt `MAIL_PASSWORD` |
+| `mail.consoleUrl`, `.timeZone`, **`.allowedDomains` (wymagane)** | linki w mailach (puste = `https://<ingress.host>`), strefa czasowa raportu dla osób bez strefy w profilu, jedyne dozwolone domeny adresatów |
+| `notifications.enabled`, `.batchWindow`, `.minInterval` | powiadomienia e-mail według reguł (wymaga `mail.smarthost`) |
+| `oidc.enabled`, `.issuer`, `.clientId`, `.clientSecret` / `.existingSecret`, `.claims` | logowanie jednokrotne |
+| `oidc.label` | tekst przycisku logowania SSO; puste = domyślny |
+| `config` | dowolne ustawienie aplikacji ([sekcja 7](#7-konfiguracja)), wygrywa ze wszystkim |
 | `session.cookieSecure` | `false` tylko do testu przez zwykłe HTTP (4.4) |
+| `logs.consoleFormat` (`text`/`ecs`), `logs.file.enabled`, `logs.serviceEnvironment` | format logów dla ELK; `serviceEnvironment` = pole `service.environment` w JSON |
+| `backend.replicas`, `frontend.replicas` | liczba replik (domyślnie 2; 2+ = aktualizacja bez przerwy) |
+| `backend.resources`, `frontend.resources` | requests / limits |
+| `backend.*` i `frontend.*`: `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `spreadAcrossNodes` | rozmieszczenie podów (`spreadAcrossNodes` – miękkie rozłożenie replik po węzłach, domyślnie włączone) |
+| `backend.*` i `frontend.*`: `pdb.enabled`, `pdb.minAvailable` | PodDisruptionBudget (domyślnie włączony, minimum 1 pod) |
+| `backend.*` i `frontend.*`: `podAnnotations`, `podLabels` | własne adnotacje i etykiety podów (np. dla Istio, agenta logów) |
+| `backend.extraEnv`, `.extraVolumes`, `.extraVolumeMounts`, `.extraContainers` | dodatkowe zmienne (np. `JAVA_TOOL_OPTIONS`), wolumeny i sidecary (np. agent logów czytający `/var/log/alerta`, wolumen `logs`) |
 | `frontend.trustedProxies` | pośrednicy, którym wierzymy w `X-Forwarded-For` (4.4a) |
-| `backend.*`, `frontend.*` | repliki, zasoby, nodeSelector, tolerations, affinity, dodatkowe zmienne/wolumeny/sidecary |
-| `logs.consoleFormat` (`text`/`ecs`), `logs.file.enabled` | format logów dla ELK |
-| `metrics.podAnnotations`, `metrics.serviceMonitor.*` | zbieranie metryk przez Prometheusa |
-| `networkPolicy.*` | domyślnie wyłączone |
+| `ingress.enabled`, `.className`, `.host` | dostęp; `enabled: false` = własny Ingress / Route / Gateway |
+| `ingress.annotations` | domyślnie NGINX Ingress: rozmiar żądania 5m, `proxy-read-timeout` 3600 i bez buforowania (aktualizacje na żywo, SSE). Inny kontroler: zastąp odpowiednikami (F5 NGINX: przykład w `values.yaml`) |
+| `ingress.tls.enabled`, `.secretName` | TLS na ingressie; `false` = TLS kończy się na load balancerze przed nim |
+| `metrics.podAnnotations`, `metrics.serviceMonitor.enabled`, `.interval`, `.labels` | zbieranie metryk przez Prometheusa (adnotacje albo ServiceMonitor Prometheus Operatora) |
+| `networkPolicy.enabled` | polityki sieciowe (domyślnie wyłączone, 4.7) |
+| `networkPolicy.ingressFrom`, `.metricsFrom` | kto może do frontendu i kto zbiera metryki z 8081 (lista `NetworkPolicyPeer`; pusta = każdy) |
+| `networkPolicy.extraEgress` | wyjście backendu poza DNS i bazą w klastrze: baza zewnętrzna, Alertmanager, SSO, poczta |
 
 **Zmiany i aktualizacje**: edytuj plik values i `helm upgrade alerta-next deploy/helm/alerta-next -n alerta-next
 -f my-values.yaml` – backend sam się restartuje, gdy zmienia się jego konfiguracja, Secrety albo CA. Nowa wersja:
@@ -596,7 +616,8 @@ secrets:
 ```
 
 Możliwe nazwy: `DB_USER`, `DB_PASSWORD` (wymagane), `DB_MIGRATION_USER`, `DB_MIGRATION_PASSWORD`,
-`ALERTMANAGER_TOKEN` albo `ALERTMANAGER_USERNAME` + `ALERTMANAGER_PASSWORD`, `OIDC_CLIENT_SECRET` (wymagane z SSO).
+`ALERTMANAGER_TOKEN` albo `ALERTMANAGER_USERNAME` + `ALERTMANAGER_PASSWORD`, `OIDC_CLIENT_SECRET` (wymagane z SSO), `MAIL_PASSWORD`;
+kolejne Alertmanagery: `ALERTMANAGER_<NAZWA>_TOKEN` albo `_USERNAME` + `_PASSWORD` (nazwa wielkimi literami, „-” → „_”).
 
 **5. Instalacja** – `helm install …` jak w 4.10. Chart zakłada `SecretProviderClass` dla backendu (wszystkie obiekty)
 i osobną dla bazy w klastrze (tylko `DB_USER`, `DB_PASSWORD`); wartości pojawiają się w podach jako pliki w
@@ -1124,13 +1145,53 @@ kubectl -n alerta-next exec deploy/alerta-next-backend -- alerta-admin list-admi
   przyjęte alerty, wiek Watchdoga, opóźnienie ścieżki alertów (`alerta_ingest_delay_seconds`), logowania i blokady, sesje, heartbeaty. Pody mają adnotacje
   `prometheus.io/scrape`. Przykładowe reguły alertów dla samej Alerty Next:
   [deploy/test-monitoring/11-rules.yaml](../../deploy/test-monitoring/11-rules.yaml) (grupa `alerta-next.yml`).
+  Gotowy dashboard Grafany (11.0+): [deploy/grafana](../../deploy/grafana/README.md); zestaw startowy reguł alertów
+  z testami: [deploy/prometheus](../../deploy/prometheus/README.md).
 
 **Logi**: czytelne linie na stdout (`kubectl logs`); w Kubernetes dodatkowo JSON (Elastic Common Schema) w pliku
 `/var/log/alerta/alerta-next.json` w podzie, dla agenta ELK. Linia na każde żądanie HTTP z identyfikatorem żądania;
-zdarzenia audytu też trafiają do logu (dla SIEM). Hasła i klucze nigdy nie pojawiają się w logach.
+zdarzenia audytu też trafiają do logu (dla SIEM, [9.1](#91-zdarzenia-audytu-dla-siem)). Hasła i klucze nigdy nie pojawiają się w logach.
 
 **Stan systemu** (Administracja → Stan systemu): wersja, rozmiar bazy, zadania w tle, Alertmanager i Watchdog,
 kwarantanna, wygasające klucze/konta, konfiguracja w użyciu (sekrety tylko jako „ustawiony / brak”).
+
+### 9.1 Zdarzenia audytu dla SIEM
+
+Każde zdarzenie audytu trafia do bazy (*Administracja → Dziennik audytu*) i jednocześnie do logu (logger
+`io.alertanext.audit`, poziom INFO – domyślnie włączony). W logu JSON (ECS) ma pola:
+
+| Pole | Wartość |
+|---|---|
+| `event.category` | zawsze `audit` – tym filtrem wybierzesz audyt z reszty logu |
+| `event.action` | nazwa akcji (tabela niżej) |
+| `event.outcome` | `success`, `failure` (np. złe hasło) albo `denied` (brak uprawnień, zablokowana poczta) |
+| `actor.type`, `actor.name` | `USER` + login, `SYSTEM` + nazwa zadania (`cli` = `alerta-admin`, `sso`, `login`, `ack-timeout`, `account-expiry`, `inactive-accounts`, `daily-report`, `notifications` …), `ANONYMOUS` (nieudane logowanie na nieistniejący login) |
+| `target.type`, `target.id`, `target.name` | czego dotyczy (`USER`, `ALERT`, `API_KEY`, `ROLE`, `ENVIRONMENT`, `ENDPOINT` …) |
+| `details` | szczegóły jako tekst JSON (np. `reason` nieudanego logowania, `to` i `purpose` maila, zmienione pola) |
+
+Nazwy akcji są częścią kontraktu ([polityka kompatybilności](../compatibility-policy.md), 2.4): w 1.x mogą dochodzić
+nowe, istniejące nie zmieniają nazwy ani znaczenia.
+
+| Obszar | Akcje |
+|---|---|
+| Logowanie i sesje | `auth.login` (`success` / `failure` z `details.reason`), `auth.logout`, `auth.lockout` (blokada po nieudanych próbach), `auth.password.change`, `auth.session.end` (użytkownik kończy swoje inne sesje) |
+| Konta | `user.create`, `user.update`, `user.delete`, `user.disable`, `user.enable`, `user.unlock`, `user.password.reset`, `user.kiosk`, `user.sessions.terminate` (administrator kończy czyjeś sesje), `user.expire` (konto tymczasowe wygasło), `user.inactive-disable` (wyłączone po bezczynności), `user.directory_name_changed` (SSO zmieniło nazwę konta) |
+| Dostęp | `role.create`, `role.update`, `role.delete`, `assignment.create`, `assignment.delete` (nadanie / odebranie roli, także przez `alerta-admin create-admin`), `group.create`, `group.update`, `group.delete`, `group.member.add`, `group.member.remove`, `group.directory_link` (powiązanie z grupą SSO), `access.export` (CSV przeglądu dostępu) |
+| Odmowy | `access.denied` (żądanie bez uprawnień, `denied`), `security.csrf_rejected` (odrzucony token CSRF w sesji, `denied`) |
+| Klucze API | `apikey.create`, `apikey.environments`, `apikey.revoke` |
+| Środowiska | `environment.create`, `environment.update`, `environment.delete`, `environment.matchers` (warunki przypisania alertów), `environment.reassign` (przeniesienie alertów między środowiskami) |
+| Alerty | `alert.ack`, `alert.unack`, `alert.close`, `alert.reopen`, `alert.ack_expired` (potwierdzenie wygasło), `alert.note`, `alert.note.edit`, `alert.note.delete`, `alert.delete`, `alert.export` (CSV) |
+| Wyciszenia | `silence.create`, `silence.expire`, `blackout.create`, `blackout.end` (okna serwisowe) |
+| Heartbeaty | `heartbeat.update`, `heartbeat.delete` |
+| Ustawienia konsoli | `label.create`, `label.update`, `label.delete`, `label.reorder`, `link.create`, `link.update`, `link.delete`, `view.shared.create`, `view.shared.update`, `view.shared.delete`, `view.shared.reorder` |
+| Poczta i raporty | `mail.sent`, `mail.failed`, `mail.blocked` (adres poza `allowedDomains`, `denied`) – `details.purpose`: `report.daily`, `report.test`, `notification`; `report.subscription`, `report.test`, `report.export` |
+| Powiadomienia | `notification-rule.create`, `notification-rule.update`, `notification-rule.delete`, `notification-preferences.update`, `group.office-hours` |
+| Łańcuch audytu | `audit.verify` (`alerta-admin verify-audit`; `failure`, gdy wynik nie jest `OK` / `MATCHES`); `audit.anchor` – tylko w logu, co godzinę (pola `audit.chain.*`, [runbook backupów](backup-runbook.pl.md) 3.6) |
+
+**Warto alarmować w SIEM** (propozycja): `auth.lockout`; seria `auth.login` z `failure`; `access.denied`
+i `security.csrf_rejected`; `mail.blocked`; `audit.verify` z `failure`; brak `audit.anchor` dłużej niż 2 godziny;
+`assignment.create` roli `ACCESS_ADMIN` oraz `user.password.reset` / `assignment.create` wykonane przez `cli`
+(dostęp awaryjny z poziomu klastra).
 
 ---
 

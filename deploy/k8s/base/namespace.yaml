@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: alerta-next
+  labels:
+    # Pod Security Standards: the strictest built-in profile.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+    # Istio ambient mesh: ztunnel gives every pod mTLS + workload identity without sidecars.
+    istio.io/dataplane-mode: ambient

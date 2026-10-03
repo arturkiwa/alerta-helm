@@ -1,0 +1,13 @@
+# Sandbox settings on top of base/config/application.yml.
+logging:
+  structured:
+    ecs:
+      service:
+        environment: sandbox
+alerta:
+  integrations:
+    alertmanager:
+      # ← your Alertmanager API for silences from the console (empty = no silences in the UI). Its login goes to
+      #   Secret alerta-next-alertmanager (token, or username + password) – see README.md.
+      url: ""
+      # ca-file: /etc/alerta/ca/internal-ca.crt   # with components/internal-ca, if Alertmanager uses the organization's CA

@@ -1,0 +1,139 @@
+# PostgreSQL 18 inside the cluster (one pod, 10 GiB volume on the cluster's DEFAULT storage class – add
+# storageClassName under volumeClaimTemplates to choose another). No backups: fine for a test, not for production.
+# Using an external / central database instead: do not apply this file – see docs/deployment, "External database".
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-db
+  namespace: alerta-next
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: alerta-next-db
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-db
+  namespace: alerta-next
+spec:
+  ports:
+  - name: tcp-postgres
+    port: 5432
+    targetPort: postgres
+  selector:
+    app.kubernetes.io/name: alerta-next-db
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app.kubernetes.io/name: alerta-next-db
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-db
+  namespace: alerta-next
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-db
+  serviceName: alerta-next-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: database
+        app.kubernetes.io/name: alerta-next-db
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: POSTGRES_DB
+          value: alerta
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: alerta-next-db
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: alerta-next-db
+        - name: POSTGRES_INITDB_ARGS
+          value: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+        image: docker.io/library/postgres:18-alpine
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d alerta
+          failureThreshold: 6
+          periodSeconds: 20
+        name: postgres
+        ports:
+        - containerPort: 5432
+          name: postgres
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d alerta
+          periodSeconds: 10
+        resources:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d alerta
+          failureThreshold: 60
+          periodSeconds: 5
+        volumeMounts:
+        - mountPath: /var/lib/postgresql
+          name: data
+        - mountPath: /var/run/postgresql
+          name: run
+        - mountPath: /tmp
+          name: tmp
+      securityContext:
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        runAsGroup: 70
+        runAsNonRoot: true
+        runAsUser: 70
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: alerta-next-db
+      volumes:
+      - emptyDir: {}
+        name: run
+      - emptyDir:
+          sizeLimit: 256Mi
+        name: tmp
+  volumeClaimTemplates:
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+      volumeMode: Filesystem

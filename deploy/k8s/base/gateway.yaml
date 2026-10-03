@@ -1,0 +1,94 @@
+# Istio-managed ingress for this app (Gateway API). Istio deploys the proxy as
+# Deployment/ServiceAccount "alerta-next-gateway-istio". TLS ends on the external load balancer,
+# which forwards plain HTTP to the workers' NodePort below.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: alerta-next-gateway
+  annotations:
+    # Istio would create a LoadBalancer Service; we expose the gateway through our own fixed NodePort instead.
+    networking.istio.io/service-type: ClusterIP
+    # One trusted hop (the external LB) in X-Forwarded-For, so audit logs see the real client address.
+    proxy.istio.io/config: '{"gatewayTopology":{"numTrustedProxies":1}}'
+spec:
+  gatewayClassName: istio
+  infrastructure:
+    parametersRef:
+      group: ""
+      kind: ConfigMap
+      name: alerta-next-gateway-options
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# Overlay for the Deployment Istio generates: its template lacks a seccomp profile, which the namespace's
+# "restricted" Pod Security level requires.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alerta-next-gateway-options
+data:
+  deployment: |
+    spec:
+      template:
+        spec:
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alerta-next-gateway-nodeport
+  labels:
+    app.kubernetes.io/name: alerta-next-gateway
+spec:
+  type: NodePort
+  selector:
+    gateway.networking.k8s.io/gateway-name: alerta-next-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30087
+    - name: status
+      port: 15021
+      targetPort: 15021
+      nodePort: 30088 # LB health check: GET /healthz/ready
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: alerta-next
+spec:
+  # Defaulted fields spelled out so GitOps diffs stay clean.
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: alerta-next-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        # The LB always terminates TLS, so the original scheme is always https.
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: X-Forwarded-Proto
+                value: https
+        # Do not advertise the proxy stack. ("server: istio-envoy" is set by Envoy itself; strip it on the external LB.)
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            remove: [x-envoy-upstream-service-time]
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: alerta-next-frontend
+          port: 8080
+          weight: 1

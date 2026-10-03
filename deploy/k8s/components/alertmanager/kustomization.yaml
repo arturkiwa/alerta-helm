@@ -1,0 +1,7 @@
+# Lets the backend reach the central Alertmanager API (silences). Set its address in network-policy.yaml and its URL in
+# overlays/<env>/config/environment.yml (alerta.integrations.alertmanager.url). Alertmanager itself delivers alerts to
+# https://<host>/api/v1/ingest/alertmanager through the normal ingress – no extra rule needed for that direction.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - network-policy.yaml

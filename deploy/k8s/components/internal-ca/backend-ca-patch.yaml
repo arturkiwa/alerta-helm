@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alerta-next-backend
+spec:
+  template:
+    spec:
+      containers:
+        - name: backend
+          volumeMounts:
+            - name: internal-ca
+              mountPath: /etc/alerta/ca
+              readOnly: true
+      volumes:
+        - name: internal-ca
+          configMap:
+            name: alerta-next-ca # from the overlay's configMapGenerator

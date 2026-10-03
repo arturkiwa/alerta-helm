@@ -1,0 +1,23 @@
+# NGINX Ingress. TLS ends on the F5, which sends plain HTTP to port 80 of the workers (the ingress controller).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alerta-next
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 5m          # batches of alerts from Alertmanager
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # live stream (SSE) stays open
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"       # … and is not buffered
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"        # HTTPS is the F5's job
+spec:
+  ingressClassName: nginx                                     # ← the controller's class, if different
+  rules:
+    - host: alerta.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: alerta-next-frontend
+                port:
+                  name: http

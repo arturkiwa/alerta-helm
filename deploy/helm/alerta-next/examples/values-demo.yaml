@@ -1,0 +1,11 @@
+# Demo on a borrowed cluster: PostgreSQL in the cluster, secrets in this file, TLS on a load balancer in front of
+# the NGINX ingress.
+#   helm install alerta-next deploy/helm/alerta-next -n alerta-next --create-namespace -f my-values.yaml
+database:
+  password: change-me-to-a-long-random-password   # openssl rand -base64 24 | tr -d '/+='
+  internal:
+    storageClass: ""                              # empty = default storage class
+ingress:
+  host: alerta.example.com
+alertmanager:
+  url: ""                                         # e.g. http://alertmanager.monitoring.svc:9093 – silences from the console

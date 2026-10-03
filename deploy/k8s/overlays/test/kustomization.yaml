@@ -1,0 +1,49 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+# Optional building blocks (see README): prometheus-scrape, gateway-metrics, external-database, alertmanager
+components:
+  - ../../components/alertmanager # test Alertmanager in namespace "monitoring" (silences)
+  - ../../components/gateway-metrics # test Prometheus in namespace "monitoring" scrapes the gateway
+  - ../../components/prometheus-scrape # test Prometheus scrapes the backend's metrics (port 8081)
+configMapGenerator:
+  - name: alerta-next-backend-config
+    behavior: merge
+    files:
+      - config/environment.yml
+# Pinned by digest: what was tested is exactly what runs. Tag kept for readability.
+images:
+  - name: cr.artbit.com.pl/mydocker/alerta-next-backend
+    newName: docker.io/arturkiwa/alerta-next-backend
+    newTag: 1.0.0-dev.f342e55
+    digest: sha256:5f034f75192d461427196e662b6ba15d74347e682bdf6c78b22879744542ed2b
+  - name: cr.artbit.com.pl/mydocker/alerta-next-frontend
+    newName: docker.io/arturkiwa/alerta-next-frontend
+    newTag: 1.0.0-dev.f342e55
+    digest: sha256:11c693b411ff236ab8895d3e46341e72049a2e88bb2880887d885ad2b8d79cc9
+  - name: postgres
+    newTag: 18-alpine
+patches:
+  - target:
+      kind: Gateway
+      name: alerta-next-gateway
+    patch: |-
+      - op: add
+        path: /spec/listeners/0/hostname
+        value: alerta.artbit.com.pl
+  - target:
+      kind: HTTPRoute
+      name: alerta-next
+    patch: |-
+      - op: add
+        path: /spec/hostnames
+        value: [alerta.artbit.com.pl]
+  - target:
+      kind: Deployment
+      name: alerta-next-frontend
+    # The Istio gateway pods (pod network 10.233.64.0/18) forward the client address in X-Forwarded-For.
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: 10.233.64.0/18

@@ -1,0 +1,33 @@
+# Demo alerts (expr "vector(1)" = always firing). "cluster" decides the environment in Alerta Next: create
+# environments with the conditions cluster = demo-prod and cluster = demo-test (docs/deployment, Quick start).
+groups:
+  - name: demo
+    rules:
+      - alert: DemoServiceDown
+        expr: vector(1)
+        labels: { severity: critical, cluster: demo-prod, service: catalog, team: catalog }
+        annotations:
+          summary: "Service catalog-api does not answer (demo alert)"
+          description: "Health check of catalog-api failed on all 3 instances."
+          runbook_url: "https://example.com/runbooks/service-down"
+      - alert: DemoDiskAlmostFull
+        expr: vector(1)
+        labels: { severity: warning, cluster: demo-prod, service: database, team: storage, instance: "db-1:9100" }
+        annotations:
+          summary: "Disk /var at 91% on db-1 (demo alert)"
+      - alert: DemoHighLatency
+        expr: vector(1)
+        labels: { severity: warning, cluster: demo-test, service: search, team: search }
+        annotations:
+          summary: "p95 latency of search above 800 ms (demo alert)"
+      - alert: DemoCertificateExpiresSoon
+        expr: vector(1)
+        labels: { severity: info, cluster: demo-test, service: gateway, team: platform }
+        annotations:
+          summary: "TLS certificate of api.demo expires in 20 days (demo alert)"
+      # Heartbeat of the whole alert path: Alerta Next does not list it, it watches that it keeps arriving.
+      - alert: Watchdog
+        expr: vector(1)
+        labels: { severity: none }
+        annotations:
+          summary: "Always firing – proves Prometheus → Alertmanager → Alerta Next works"

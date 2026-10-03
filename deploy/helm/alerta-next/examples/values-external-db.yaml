@@ -1,0 +1,38 @@
+# External/central PostgreSQL over verified TLS, own CA, separate migration account, secrets from existing
+# Kubernetes Secrets (created by you, the Vault Secrets Operator, External Secrets …), TLS on the ingress, single sign-on.
+#   helm install alerta-next deploy/helm/alerta-next -n alerta-next -f my-values.yaml --set-file internalCA.certificate=./ca.crt
+secrets:
+  mode: existing
+database:
+  existingSecret: alerta-next-db        # keys: username, password, migration-username, migration-password
+  internal:
+    enabled: false
+  external:
+    host: pg.example.internal
+    port: 5432
+    name: monitoring
+    sslMode: verify-full                # verified against internalCA
+  schema: alerta_next
+alertmanager:
+  url: https://alertmanager.example.internal
+  existingSecret: alerta-next-alertmanager   # key: token (or username + password)
+oidc:
+  enabled: true
+  issuer: https://sso.example.internal/realms/example
+  clientId: alerta-next
+  existingSecret: alerta-next-oidc           # key: client-secret
+  claims: { username: preferred_username, display-name: name, email: email, groups: groups }
+config:
+  alerta:
+    auth:
+      local:
+        mode: BREAK_GLASS_ONLY
+        break-glass-users: [admin]
+ingress:
+  host: alerta.example.internal
+  tls:
+    enabled: true
+    secretName: alerta-tls
+logs:
+  consoleFormat: ecs
+  serviceEnvironment: prod

@@ -1,0 +1,146 @@
+# Backend configuration, mounted as /etc/alerta/application.yml (ConfigMap alerta-next-backend-config).
+# Overrides the defaults built into the image. Changing this file changes the ConfigMap name (hash), so ArgoCD
+# rolls the backend automatically. Invalid values stop the backend at start-up with the offending key in the log.
+# Secrets (DB password …) never go here – they come from Secrets as environment variables.
+# Per-environment overrides: overlays/<env>/config/environment.yml (imported below, wins over this file).
+
+spring:
+  config:
+    import: optional:file:/etc/alerta/environment.yml
+
+logging:
+  # Two outputs of the same events: readable Spring Boot lines on the console (kubectl logs), and JSON in Elastic
+  # Common Schema in a file for ELK (emptyDir /var/log/alerta, read by the ELK agent, e.g. a Filebeat sidecar).
+  # For an ELK agent that reads container stdout instead: console: ecs and drop file.name.
+  structured:
+    format:
+      file: ecs
+    ecs:
+      service:
+        name: alerta-next
+  file:
+    name: /var/log/alerta/alerta-next.json
+  logback:
+    rollingpolicy:
+      max-file-size: 50MB
+      total-size-cap: 400MB   # below the emptyDir limit (512Mi)
+  level:
+    root: INFO
+    io.alertanext.http: INFO  # one line per HTTP request; WARN = off
+    io.alertanext.audit: INFO # audit events for the SIEM
+
+alerta:
+  auth:
+    local:
+      # ENABLED | BREAK_GLASS_ONLY | DISABLED – deliberately only here, never in the UI.
+      mode: ENABLED
+      break-glass-users: []
+    oidc:                    # single sign-on (OpenID Connect, e.g. the organization's Keycloak)
+      enabled: false
+      issuer: ${OIDC_ISSUER:}                   # e.g. https://sso.example.com/realms/example (discovery from here)
+      client-id: ${OIDC_CLIENT_ID:}
+      client-secret: ${OIDC_CLIENT_SECRET:}     # from a Secret / Vault
+      scopes: [openid, profile, email]
+      claims:                                   # where the token carries the user's data
+        username: preferred_username
+        display-name: name
+        email: email
+        groups: groups                          # list of directory groups (a groups mapper in Keycloak)
+      required-acr: []                          # e.g. [mfa] – reject sign-ins without this level
+      end-session: true                         # signing out also ends the SSO session
+      redirect-uri: "{baseUrl}/api/v1/auth/oidc/callback"
+      label: ""                                 # sign-in button text; empty = "Zaloguj przez SSO"
+      ca-file: ""                               # e.g. /etc/alerta/ca/internal-ca.crt (components/internal-ca)
+      insecure-skip-verify: false
+      timeout: 10s
+  session:
+    idle-privileged: 30m
+    idle-standard: 8h
+    absolute: 12h
+    kiosk-absolute: 30d  # kiosk accounts (wall screens, read-only): no idle limit, only this
+  login:
+    max-failures: 5
+    lockout-base: 15m
+    lockout-max: 1h
+    ip-max-failures: 20
+    ip-window: 15m
+  passwords:
+    min-length: 12
+    min-length-privileged: 16
+    max-length: 128
+    forbidden-words: [alerta]   # context words a password may not contain (add the organisation's and systems' names)
+    one-time-validity: 72h      # a one-time password (new account, reset) must be used within this time
+  accounts:
+    temporary-max-validity: 180d
+    inactive-disable-after:     # e.g. 90d: local accounts unused this long are disabled (empty = never, min. 30d)
+  environments:
+    classes:
+      - code: PROD
+        retention-days: 400
+      - code: PREPROD
+        retention-days: 90
+      - code: UAT
+        retention-days: 30
+      - code: TEST
+        retention-days: 30
+      - code: DEV
+        retention-days: 14
+  alerts:
+    # How Alertmanager alerts are read (label/annotation names). Environments are matched by conditions set in the UI.
+    severity-label: severity
+    severity-aliases:
+      critical: CRITICAL
+      error: ERROR
+      err: ERROR
+      warning: WARNING
+      informational: INFORMATIONAL
+      info: INFORMATIONAL
+      normal: NORMAL
+      ok: NORMAL
+    title-label: alertname
+    service-label: service
+    summary-annotation: summary
+    description-annotation: description
+    runbook-annotation: runbook_url
+    watchdog-alertname: Watchdog
+    watchdog-timeout: 5m        # a Watchdog (one per Prometheus and Alertmanager) missing this long raises an alert
+    max-alerts-per-request: 1000
+    ack-timeout: 8h             # acknowledgement lapses after this (per-environment override in the UI); 0 = never
+    flapping-threshold: 3       # fired again this many times …
+    flapping-window: 1h         # … within this period = flapping
+    resolve-grace: 5m           # "resolved" final only if the alert stays quiet this long (per-environment override); 0 = at once
+    highlight-new: 10m          # the console highlights a new or returning alert this long; 0 = never
+  integrations:
+    alertmanager:
+      # Central Alertmanager for silences (empty = silences are not offered). Token: Secret alerta-next-alertmanager.
+      url: ""
+      ca-file: ""                # e.g. /etc/alerta/ca/internal-ca.crt (components/internal-ca)
+      insecure-skip-verify: false
+      timeout: 10s
+      sync-interval: 30s
+    # Further Alertmanagers (e.g. one per cluster); silences go to every one that has the alert (docs/deployment 8.2).
+    alertmanagers: []
+    #  - name: waw
+    #    url: https://alertmanager.waw.example:9093
+    #    bearer-token: ${ALERTMANAGER_WAW_TOKEN:}
+  # Outgoing mail for the daily report users subscribe to in their profile (names as Alertmanager's smtp_*).
+  # No smarthost = the report is not offered.
+  mail:
+    from: ""                    # smtp_from, e.g. alerta@example.com
+    hello: ""                   # smtp_hello (EHLO name)
+    smarthost: ""               # smtp_smarthost HOST:PORT, e.g. 10.1.2.3:25 (465 = TLS from the start)
+    require-tls: false          # smtp_require_tls: STARTTLS, refuse without it
+    username: ""                # empty = relay without authentication; with it: password from MAIL_PASSWORD
+    password: ${MAIL_PASSWORD:}
+    ca-file:                    # extra CA (PEM) for TLS to the relay
+    console-url: ""             # links in the mail, e.g. https://alerta.example.com
+    time-zone: Europe/Warsaw    # when "7:00" is for users without a time zone in their profile
+    allowed-domains: []         # REQUIRED with a smarthost: the only domains mail may go to, e.g. [example.com]
+  # E-mail notifications by rules (page "Powiadomienia") instead of Alertmanager's receivers; needs mail above.
+  notifications:
+    enabled: false
+    batch-window: 2m            # what arrives for one person within this time goes out in one mail
+    min-interval: 5m            # at most one mail per person this often
+  # Links from alerts to other tools (Administration → Labels): https only, only to these hosts; empty = no links
+  links:
+    allowed-hosts: []           # links to tools and of changes, e.g. [grafana.example.com, argocd.example.com]

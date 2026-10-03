@@ -1,0 +1,133 @@
+# Frontend (nginx with the web UI, 2 replicas). Serves the UI and forwards /api to the backend – browser and API on
+# one origin. Image: docker.io/arturkiwa/alerta-next-frontend – keep the same tag as the backend.
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-frontend
+  namespace: alerta-next
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: alerta-next-frontend
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-frontend
+  namespace: alerta-next
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/name: alerta-next-frontend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: alerta-next-frontend
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-frontend
+  namespace: alerta-next
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-frontend
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/name: alerta-next-frontend
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: BACKEND_URL
+          value: http://alerta-next-backend:8080
+        # CHANGE: proxies whose X-Forwarded-For is believed – the ingress controller pods (and the load balancer in front,
+        # if it forwards the client address), comma-separated CIDRs, e.g. 10.233.64.0/18. Empty = only the direct
+        # connection: nobody can fake an address, but every client shows as the ingress in the audit.
+        - name: TRUSTED_PROXIES
+          value: ""
+        image: docker.io/arturkiwa/alerta-next-frontend:0.13.0
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 15
+        name: frontend
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /etc/nginx/conf.d
+          name: nginx-conf
+        - mountPath: /tmp
+          name: tmp
+      securityContext:
+        runAsGroup: 101
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: alerta-next-frontend
+      terminationGracePeriodSeconds: 45
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: alerta-next-frontend
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      volumes:
+      - emptyDir:
+          sizeLimit: 1Mi
+        name: nginx-conf
+      - emptyDir:
+          sizeLimit: 64Mi
+        name: tmp
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-frontend
+  namespace: alerta-next
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-frontend

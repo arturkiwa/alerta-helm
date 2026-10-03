@@ -419,7 +419,8 @@ If your cluster does not enforce NetworkPolicies they are ignored. External data
 ### 4.8 Upgrade and removal
 - **Upgrade**: change the image tags (backend and frontend to the same version) and `kubectl apply -f .`. Pods are
   replaced one by one without an outage; database migrations run at start and are backward compatible with the
-  previous version.
+  previous version. What is guaranteed between versions (configuration, API, metrics, logs, skipping versions,
+  rollback): [compatibility policy](../compatibility-policy.md) (in Polish).
 - **Removal**: `kubectl delete namespace alerta-next` (deletes everything, including the database volume).
 
 ### 4.9 If something does not work
@@ -475,31 +476,49 @@ helm upgrade --install alerta-next deploy/helm/alerta-next -n alerta-next -f my-
 The chart mounts it as `/etc/alerta/ca/ca.crt` and uses it for the Alertmanager API, SSO and – with
 `database.external.sslMode: verify-full` – the database.
 
-**Most used parameters**
+**All parameters** (details and examples in the comments of [`values.yaml`](../../deploy/helm/alerta-next/values.yaml))
 
 | Parameter | Meaning |
 |---|---|
-| `image.registry`, `image.tag`, `image.pullSecrets` | your registry mirror, version (empty = chart `appVersion`), pull Secret |
-| `secrets.mode` (`values` / `existing` / `csi`) | where secrets come from ([5.1](#51-helm-where-the-secrets-come-from-secretsmode)) |
-| `database.password` / `database.existingSecret` / `secrets.csi.vault.*` | database login |
-| `database.internal.enabled`, `.storageClass`, `.size` | PostgreSQL in the cluster and its volume |
-| `database.internal.backup.enabled`, `.schedule`, `.keep`, `.storageClass`, `.size` | nightly dump of the internal database to a separate volume ([runbook](backup-runbook.md)) |
-| `database.external.host`, `.port`, `.name`, `.sslMode` (or `.url`), `database.schema`, `database.migrate` | external database ([6.2](#62-external-or-central-postgresql)) |
-| `internalCA.*` | your CA (above) |
-| `alertmanager.url`, `.token` / `.username`+`.password` / `.existingSecret` | silences from the console |
-| `alertmanagers[]` (`name`, `url`, login as above) | further Alertmanagers ([8.2](#82-several-alertmanagers)) |
-| `oidc.enabled`, `.issuer`, `.clientId`, `.clientSecret` / `.existingSecret`, `.claims` | single sign-on |
-| `config` | any application setting ([section 7](#7-configuration)), wins over everything |
-| `mail.*` | daily e-mail report: `smarthost`, `from`, `hello`, `requireTls`, `username` + password, `consoleUrl`, **`allowedDomains` (required)** |
-| `notifications.*` | e-mail notifications by rules: `enabled` (needs `mail.smarthost`), `batchWindow`, `minInterval` |
 | `fullnameOverride` | base name of all objects (e.g. `alerta` → `alerta-backend`, `alerta-db`); empty = the release name |
-| `ingress.host`, `.className`, `.annotations`, `.tls.*` | access |
+| `image.registry`, `.backend`, `.frontend` | registry and image names (your registry mirror, 4.6) |
+| `image.tag`, `.pullPolicy`, `.pullSecrets` | version (empty = chart `appVersion`; backend and frontend always the same), pull policy, pull Secrets |
+| `secrets.mode` (`values` / `existing` / `csi`) | where secrets come from ([5.1](#51-helm-where-the-secrets-come-from-secretsmode)) |
+| `secrets.csi.vault.address`, `.authPath`, `.role`, `.namespace`, `.objects` | Vault through CSI: address, path of the Kubernetes auth method, role, Vault Enterprise namespace, where each secret lives ([5.2](#52-vault-with-the-secrets-store-csi-driver-step-by-step)) |
+| `secrets.csi.secretProviderClass` | your own `SecretProviderClass` / another CSI provider instead of Vault (empty with Vault) |
+| `database.username`, `.password` / `.existingSecret` | the application's database login (with the internal database also the superuser, set only at the first start) |
+| `database.migrationUsername`, `.migrationPassword` | separate account for schema migrations (external database, [6.2](#62-external-or-central-postgresql)); both or none |
+| `database.internal.enabled`, `.image`, `.storageClass`, `.size` | PostgreSQL in the cluster (one pod, no HA) and its volume |
+| `database.internal.resources`, `.nodeSelector`, `.tolerations`, `.affinity` | resources and placement of the database pod |
+| `database.internal.backup.enabled`, `.schedule`, `.keep`, `.storageClass`, `.size`, `.resources` | nightly dump of the internal database to a separate volume ([runbook](backup-runbook.md)); `schedule` in the cluster's time zone |
+| `database.external.host`, `.port`, `.name`, `.sslMode` (or `.url`) | external database ([6.2](#62-external-or-central-postgresql)); `url` wins over the rest |
+| `database.schema`, `database.migrate` | schema of Alerta Next; `false` = a DBA applies the migrations |
+| `database.poolSize` | connections per backend replica (default 20); `max_connections` ≥ (replicas + 1) × `poolSize` |
+| `internalCA.certificate` / `.existingConfigMap` | your CA (above) |
+| `alertmanager.url`, `.token` / `.username`+`.password` / `.existingSecret` | Alertmanager `default` – silences from the console. Deprecated next to `alertmanagers[]`, works until 2.0 ([compatibility policy](../compatibility-policy.md)) |
+| `alertmanagers[]` (`name`, `url`, login as above) | further Alertmanagers ([8.2](#82-several-alertmanagers)); Vault CSI: objects `ALERTMANAGER_<NAME>_TOKEN` etc. |
+| `mail.smarthost`, `.from`, `.hello`, `.requireTls`, `.username`, `.password` / `.existingSecret` | outgoing mail (names as Alertmanager's `smtp_*`); Vault CSI: object `MAIL_PASSWORD` |
+| `mail.consoleUrl`, `.timeZone`, **`.allowedDomains` (required)** | links in mails (empty = `https://<ingress.host>`), report time zone for users without one in their profile, the only domains mail may go to |
+| `notifications.enabled`, `.batchWindow`, `.minInterval` | e-mail notifications by rules (needs `mail.smarthost`) |
+| `oidc.enabled`, `.issuer`, `.clientId`, `.clientSecret` / `.existingSecret`, `.claims` | single sign-on |
+| `oidc.label` | SSO sign-in button text; empty = default |
+| `config` | any application setting ([section 7](#7-configuration)), wins over everything |
 | `session.cookieSecure` | `false` only for a plain-HTTP test (4.4) |
+| `logs.consoleFormat` (`text`/`ecs`), `logs.file.enabled`, `logs.serviceEnvironment` | log format for ELK; `serviceEnvironment` = the `service.environment` field in JSON |
+| `backend.replicas`, `frontend.replicas` | number of replicas (default 2; 2+ = upgrades without downtime) |
+| `backend.resources`, `frontend.resources` | requests / limits |
+| `backend.*` and `frontend.*`: `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `spreadAcrossNodes` | pod placement (`spreadAcrossNodes` – soft spread of the replicas over nodes, on by default) |
+| `backend.*` and `frontend.*`: `pdb.enabled`, `pdb.minAvailable` | PodDisruptionBudget (on by default, at least 1 pod) |
+| `backend.*` and `frontend.*`: `podAnnotations`, `podLabels` | your own pod annotations and labels (e.g. for Istio, a log agent) |
+| `backend.extraEnv`, `.extraVolumes`, `.extraVolumeMounts`, `.extraContainers` | extra variables (e.g. `JAVA_TOOL_OPTIONS`), volumes and sidecars (e.g. a log agent reading `/var/log/alerta`, volume `logs`) |
 | `frontend.trustedProxies` | proxies whose `X-Forwarded-For` is believed (4.4a) |
-| `backend.*`, `frontend.*` | replicas, resources, nodeSelector, tolerations, affinity, extra env/volumes/sidecars |
-| `logs.consoleFormat` (`text`/`ecs`), `logs.file.enabled` | log format for ELK |
-| `metrics.podAnnotations`, `metrics.serviceMonitor.*` | Prometheus scraping |
-| `networkPolicy.*` | off by default |
+| `ingress.enabled`, `.className`, `.host` | access; `enabled: false` = your own Ingress / Route / Gateway |
+| `ingress.annotations` | by default NGINX Ingress: request size 5m, `proxy-read-timeout` 3600 and no buffering (live updates, SSE). Another controller: replace with its equivalents (F5 NGINX: example in `values.yaml`) |
+| `ingress.tls.enabled`, `.secretName` | TLS on the ingress; `false` = TLS ends on a load balancer in front of it |
+| `metrics.podAnnotations`, `metrics.serviceMonitor.enabled`, `.interval`, `.labels` | Prometheus scraping (annotations or a Prometheus Operator ServiceMonitor) |
+| `networkPolicy.enabled` | network policies (off by default, 4.7) |
+| `networkPolicy.ingressFrom`, `.metricsFrom` | who may reach the frontend and who may scrape metrics on 8081 (`NetworkPolicyPeer` list; empty = anyone) |
+| `networkPolicy.extraEgress` | backend egress besides DNS and the internal database: external database, Alertmanager, SSO, mail |
 
 **Changes and upgrades**: edit the values file and `helm upgrade alerta-next deploy/helm/alerta-next -n alerta-next
 -f my-values.yaml` – the backend restarts by itself when its configuration, Secrets or CA change. A new version:
@@ -599,7 +618,8 @@ secrets:
 ```
 
 Possible names: `DB_USER`, `DB_PASSWORD` (required), `DB_MIGRATION_USER`, `DB_MIGRATION_PASSWORD`,
-`ALERTMANAGER_TOKEN` or `ALERTMANAGER_USERNAME` + `ALERTMANAGER_PASSWORD`, `OIDC_CLIENT_SECRET` (required with SSO).
+`ALERTMANAGER_TOKEN` or `ALERTMANAGER_USERNAME` + `ALERTMANAGER_PASSWORD`, `OIDC_CLIENT_SECRET` (required with SSO), `MAIL_PASSWORD`;
+further Alertmanagers: `ALERTMANAGER_<NAME>_TOKEN` or `_USERNAME` + `_PASSWORD` (the name in capitals, "-" → "_").
 
 **5. Install** – `helm install …` as in 4.10. The chart creates a `SecretProviderClass` for the backend (all objects)
 and one for the internal database (only `DB_USER`, `DB_PASSWORD`); the values appear in the pods as files in
@@ -1128,13 +1148,53 @@ kubectl -n alerta-next exec deploy/alerta-next-backend -- alerta-admin list-admi
   ingested alerts, age of the Watchdog, delay of the alert path (`alerta_ingest_delay_seconds`), logins and lockouts, sessions, heartbeats. The pods carry
   `prometheus.io/scrape` annotations. Example alert rules for Alerta Next itself:
   [deploy/test-monitoring/11-rules.yaml](../../deploy/test-monitoring/11-rules.yaml) (group `alerta-next.yml`).
+  A ready Grafana dashboard (11.0+): [deploy/grafana](../../deploy/grafana/README.md); a starting set of alert rules
+  with tests: [deploy/prometheus](../../deploy/prometheus/README.md).
 
 **Logs**: readable lines on stdout (`kubectl logs`); in Kubernetes additionally JSON (Elastic Common Schema) in
 `/var/log/alerta/alerta-next.json` inside the pod for an ELK agent. One line per HTTP request with a request id; audit
-events are logged too (for a SIEM). Passwords and keys never appear in logs.
+events are logged too (for a SIEM, [9.1](#91-audit-events-for-a-siem)). Passwords and keys never appear in logs.
 
 **System status** (Administration → System status): version, database size, background jobs, Alertmanager and
 Watchdog, quarantine, expiring keys/accounts, the configuration in use (secrets only as "set / not set").
+
+### 9.1 Audit events for a SIEM
+
+Every audit event goes to the database (*Administration → Audit log*) and to the log at the same time (logger
+`io.alertanext.audit`, level INFO – on by default). In the JSON (ECS) log it has the fields:
+
+| Field | Value |
+|---|---|
+| `event.category` | always `audit` – this filter picks the audit out of the rest of the log |
+| `event.action` | the action name (table below) |
+| `event.outcome` | `success`, `failure` (e.g. a wrong password) or `denied` (no permission, mail blocked) |
+| `actor.type`, `actor.name` | `USER` + login, `SYSTEM` + job name (`cli` = `alerta-admin`, `sso`, `login`, `ack-timeout`, `account-expiry`, `inactive-accounts`, `daily-report`, `notifications` …), `ANONYMOUS` (failed sign-in with an unknown login) |
+| `target.type`, `target.id`, `target.name` | what it concerns (`USER`, `ALERT`, `API_KEY`, `ROLE`, `ENVIRONMENT`, `ENDPOINT` …) |
+| `details` | details as JSON text (e.g. `reason` of a failed sign-in, `to` and `purpose` of a mail, changed fields) |
+
+The action names are part of the contract ([compatibility policy](../compatibility-policy.md), 2.4): in 1.x new ones
+may appear, existing ones keep their names and meaning.
+
+| Area | Actions |
+|---|---|
+| Sign-in and sessions | `auth.login` (`success` / `failure` with `details.reason`), `auth.logout`, `auth.lockout` (lock after failed attempts), `auth.password.change`, `auth.session.end` (a user ends their other sessions) |
+| Accounts | `user.create`, `user.update`, `user.delete`, `user.disable`, `user.enable`, `user.unlock`, `user.password.reset`, `user.kiosk`, `user.sessions.terminate` (an administrator ends someone's sessions), `user.expire` (temporary account expired), `user.inactive-disable` (disabled after inactivity), `user.directory_name_changed` (SSO renamed the account) |
+| Access | `role.create`, `role.update`, `role.delete`, `assignment.create`, `assignment.delete` (role granted / taken away, also by `alerta-admin create-admin`), `group.create`, `group.update`, `group.delete`, `group.member.add`, `group.member.remove`, `group.directory_link` (link to an SSO group), `access.export` (access review CSV) |
+| Refusals | `access.denied` (request without permission, `denied`), `security.csrf_rejected` (CSRF token rejected in a session, `denied`) |
+| API keys | `apikey.create`, `apikey.environments`, `apikey.revoke` |
+| Environments | `environment.create`, `environment.update`, `environment.delete`, `environment.matchers` (alert assignment conditions), `environment.reassign` (alerts moved between environments) |
+| Alerts | `alert.ack`, `alert.unack`, `alert.close`, `alert.reopen`, `alert.ack_expired` (acknowledgement lapsed), `alert.note`, `alert.note.edit`, `alert.note.delete`, `alert.delete`, `alert.export` (CSV) |
+| Silences | `silence.create`, `silence.expire`, `blackout.create`, `blackout.end` (maintenance windows) |
+| Heartbeats | `heartbeat.update`, `heartbeat.delete` |
+| Console settings | `label.create`, `label.update`, `label.delete`, `label.reorder`, `link.create`, `link.update`, `link.delete`, `view.shared.create`, `view.shared.update`, `view.shared.delete`, `view.shared.reorder` |
+| Mail and reports | `mail.sent`, `mail.failed`, `mail.blocked` (address outside `allowedDomains`, `denied`) – `details.purpose`: `report.daily`, `report.test`, `notification`; `report.subscription`, `report.test`, `report.export` |
+| Notifications | `notification-rule.create`, `notification-rule.update`, `notification-rule.delete`, `notification-preferences.update`, `group.office-hours` |
+| Audit chain | `audit.verify` (`alerta-admin verify-audit`; `failure` when the result is not `OK` / `MATCHES`); `audit.anchor` – log only, hourly (fields `audit.chain.*`, [backup runbook](backup-runbook.md) 3.6) |
+
+**Worth alerting on in the SIEM** (suggestion): `auth.lockout`; a series of `auth.login` with `failure`;
+`access.denied` and `security.csrf_rejected`; `mail.blocked`; `audit.verify` with `failure`; no `audit.anchor` for
+over 2 hours; `assignment.create` of the `ACCESS_ADMIN` role and `user.password.reset` / `assignment.create` done by
+`cli` (emergency access from the cluster).
 
 ---
 

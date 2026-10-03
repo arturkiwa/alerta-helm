@@ -1,0 +1,11 @@
+# Demo Prometheus: no targets of its own, only rules that always fire – so there is something to see.
+global:
+  evaluation_interval: 15s
+  external_labels:
+    source: quickstart
+rule_files:
+  - rules.yml
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]

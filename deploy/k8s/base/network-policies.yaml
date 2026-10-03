@@ -1,0 +1,148 @@
+# Default deny in both directions, then explicit paths:
+#   external LB → gateway → frontend → backend → db
+# Port 15008 is HBONE: in the ambient mesh, pod-to-pod traffic arrives on it (mTLS tunnel from ztunnel).
+# 169.254.7.127 is the address Istio ambient uses for kubelet health probes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# DNS goes to nodelocaldns (169.254.25.10), which Cilium classifies as the "host" entity. A plain
+# NetworkPolicy ipBlock cannot match that, hence this Cilium-specific policy (DNS port only).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [host]
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ambient-probes
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 169.254.7.127/32
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+spec:
+  podSelector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: alerta-next-gateway
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # From the external LB via NodePort (source is a node address after kube-proxy), so no "from" restriction.
+    - ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 15021 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerta-next-frontend
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 15008 }
+    - to: # configuration (xDS) and certificates from istiod
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+      ports:
+        - { protocol: TCP, port: 15012 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-frontend
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: alerta-next-gateway
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 15008 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerta-next-backend
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 15008 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerta-next-frontend
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 15008 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerta-next-db
+      ports:
+        - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: 15008 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-db
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerta-next-backend
+      ports:
+        - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: 15008 }

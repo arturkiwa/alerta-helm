@@ -1,0 +1,12 @@
+# The usual "kubernetes-pods" scrape job discovers pods by these annotations.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alerta-next-backend
+spec:
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: /actuator/prometheus

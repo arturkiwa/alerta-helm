@@ -242,3 +242,48 @@ usunięcie wolumenu bazy, odtworzenie do nowej pustej bazy – liczby wierszy id
 zmian, logowanie działa, audyt pisze dalej od kolejnego numeru; odtworzenie na istniejącą, uszkodzoną bazę
 (`--clean --single-transaction`) – także poprawne, wyzwalacze (na żywo, audyt tylko do dopisywania) wracają.
 Czas samego `pg_restore`: ~4 s.
+
+### 4.1 Pełna próba utraty bazy (kryterium 1.0)
+
+Próba z kwartału sprawdza, że zrzut się odtwarza. Ta sprawdza **całą procedurę z rozdziału 3** z pomiarem czasu – na
+instalacji testowej (osobny namespace z tym samym chartem i tą samą wersją), **nie na produkcji** – krok T0 usuwa
+wolumen bazy.
+Zrzut bierzemy **z kopii poza klastrem** (2.2), bo tak wygląda prawdziwa utrata klastra lub magazynu.
+
+**Przygotowanie (T−1 dzień)**
+
+1. Instalacja z danymi zbliżonymi do produkcji (kilka środowisk, użytkownicy, klucze API, aktywne alerty z co
+   najmniej jednego Alertmanagera, Watchdog).
+2. Kopia nocna wykonana i **skopiowana poza klaster** – zanotuj jej czas (`T_kopii`).
+
+**Zmiany po kopii – to, co odtworzenie musi cofnąć i co trzeba odzyskać**
+
+3. Wyłącz konto testowe `proba-odtworzenia`, unieważnij klucz API `proba-odtworzenia`, odbierz jedną rolę.
+4. Dodaj notatkę do aktywnego alertu, potwierdź inny.
+5. Odczekaj pełną godzinę (do `:05`), żeby w logu była kotwica łańcucha audytu nowsza niż kopia.
+
+**Utrata i odtworzenie – mierz czas każdego kroku**
+
+| Krok | Rozdział | Start | Koniec |
+|---|---|---|---|
+| T0: zrzut uszkodzonej bazy (3.1), potem usunięcie wolumenu bazy (symulacja utraty) | 3.1 | | |
+| Zatrzymanie backendu | 3.2 | | |
+| Pobranie zrzutu z kopii poza klastrem na wolumen / do poda | 2.2 | | |
+| `pg_restore` | 3.3 | | |
+| Unieważnienie sesji | 3.4 | | |
+| Ponowne odebranie uprawnień (z punktu 3) | 3.5 | | |
+| Start backendu, logowanie działa | 3.6 | | |
+| **RTO = koniec ostatniego kroku − T0** | | | |
+
+**Sprawdzenie**
+
+- [ ] Liczby wierszy (`users`, `environments`, `api_keys`, `alerts`, `audit_log`) jak w bazie z chwili kopii.
+- [ ] Logowanie SSO i kontem awaryjnym; stare sesje nie działają.
+- [ ] Konto i klucz `proba-odtworzenia` znów wyłączone / unieważnione, rola odebrana (krok 3.5 zadziałał).
+- [ ] Notatka i potwierdzenie z punktu 4 zniknęły (oczekiwane – wpisane w rejestr jako utracone).
+- [ ] `alerta-admin verify-audit` z kotwicami: sprzed kopii `MATCHES`, z punktu 5 `TRUNCATED`; łańcuch `OK`.
+- [ ] Aktywne alerty wróciły po `repeat_interval` Alertmanagera; Watchdog świeży (`alerta_watchdog_age_seconds`).
+- [ ] Heartbeaty wróciły przy najbliższym sygnale; *Stan systemu* bez błędów.
+
+**Wynik** – zapisz tu i w rejestrze zdarzeń: data, wersja, rozmiar zrzutu, RTO, odchylenia od procedury, poprawki
+runbooka. RTO dłuższe niż w tabeli z rozdziału 1 – popraw tabelę (to ona ma mówić prawdę).

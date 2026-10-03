@@ -1,0 +1,16 @@
+# ztunnel enforces the namespace's ALLOW policies on every connection, including plain-text ones from a Prometheus
+# outside the mesh (no principal to match). This rule admits the metrics port only; the NetworkPolicy next to it
+# limits who may connect. Verified on the test cluster: 8081 reachable, 8080 still refused.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: backend-metrics
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  action: ALLOW
+  rules:
+    - to:
+        - operation:
+            ports: ["8081"]

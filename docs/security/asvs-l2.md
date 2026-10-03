@@ -86,7 +86,7 @@ na przeciążenie potwierdzona testem obciążeniowym (`load/README.md`: ok. 10�
 - Domyślnie wszystko zamknięte (`denyAll`); każdy punkt końcowy ma `@PreAuthorize` z uprawnieniem.
 - **Role per środowisko:** Obserwator (podgląd), Operator (akcje na alertach), Opiekun (okna serwisowe, heartbeaty);
   **globalne:** Administrator dostępu, Audytor (rozdział obowiązków – administrator nie czyta audytu, dopóki nie dostanie
-  roli Audytora, co samo trafia do audytu). Szczegóły: `architecture.md` → model uprawnień.
+  roli Audytora, co samo trafia do audytu). Szczegóły: [instrukcja wdrożenia](../deployment/README.pl.md), rozdział 2 (role i uprawnienia).
 - Dane filtrowane po środowiskach w zapytaniach; obiekt spoza uprawnień → 404 (nie zdradza istnienia). Kwarantanna –
   tylko administrator dostępu. Uprawnienia liczone przy każdym żądaniu z bazy (zmiana działa natychmiast).
 - Poziom pól: brak ograniczeń poza tym, że sekrety (skróty haseł, klucze API, sekrety integracji) nigdy nie są zwracane.
@@ -133,7 +133,7 @@ W przeglądarce: tylko cookie sesji (HttpOnly) i preferencje w localStorage; `Ca
 | Log | Treść | Format / miejsce | Retencja |
 |---|---|---|---|
 | Żądania HTTP | metoda, ścieżka (bez query), status, czas, użytkownik, IP, identyfikator żądania | stdout (tekst lub ECS) + plik `/var/log/alerta/alerta-next.json` (ECS) | wg ELK |
-| Audyt | każda zmiana dostępu, logowanie (udane/nieudane, SSO), odmowa dostępu, odrzucony token CSRF, akcje na alertach, eksporty, wyciszenia | tabela `audit_log` (tylko dopisywanie – wyzwalacz) + logger `io.alertanext.audit` → ELK/SIEM | baza: bez usuwania; ELK wg polityki organizacji |
+| Audyt | każda zmiana dostępu, logowanie (udane/nieudane, SSO), odmowa dostępu, odrzucony token CSRF, akcje na alertach, eksporty, wyciszenia | tabela `audit_log` (tylko dopisywanie – wyzwalacz) + logger `io.alertanext.audit` → ELK/SIEM (pola i lista akcji: instrukcja wdrożenia 9.1) | baza: bez usuwania; ELK wg polityki organizacji |
 | Historia alertu | zdarzenia alertu (wystąpienia, akcje, notatki) | tabela `alert_events` | razem z alertem (retencja środowiska) |
 | Błędy | nieoczekiwane wyjątki ze stosem wywołań (tylko w logu, klient dostaje identyfikator) | stdout / plik | wg ELK |
 
@@ -347,7 +347,7 @@ Kolumna „Wymaganie” to skrót treści ASVS (pełny tekst: OWASP ASVS 5.0.0).
 
 | Id | L | Wymaganie | Status | Uzasadnienie |
 |---|---|---|---|---|
-| V8.1.1 | 1 | Authorization documentation defines rules for restricting function-level and data-specific access based on consumer permissions and resource… | ✅ | Sekcja A.5 + `architecture.md` (model uprawnień: role per środowisko, uprawnienia globalne). |
+| V8.1.1 | 1 | Authorization documentation defines rules for restricting function-level and data-specific access based on consumer permissions and resource… | ✅ | Sekcja A.5 + instrukcja wdrożenia, rozdział 2 (role per środowisko, uprawnienia globalne). |
 | V8.1.2 | 2 | Authorization documentation defines rules for field-level access restrictions (both read and write) based on consumer permissions and resource… | ✅ | Sekcja A.5: brak ograniczeń na poziomie pól poza sekretami (nigdy nie zwracane). |
 | V8.2.1 | 1 | The application ensures that function-level access is restricted to consumers with explicit permissions. | ✅ | `denyAll` domyślnie, `@PreAuthorize` na każdym punkcie końcowym; testy dostępu. |
 | V8.2.2 | 1 | The application ensures that data-specific access is restricted to consumers with explicit permissions to specific data items to mitigate insecure… | ✅ | Filtry środowisk w zapytaniach, `readable(id)` → 404 dla cudzych obiektów; testy regresji (np. oś czasu, heartbeaty). |

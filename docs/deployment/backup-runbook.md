@@ -246,3 +246,49 @@ database volume deleted, restored into a new empty database – row counts ident
 sign-in works, the audit log goes on with the next number; restore over an existing broken database
 (`--clean --single-transaction`) – correct too, the triggers (live updates, append-only audit) come back. The
 `pg_restore` itself: ~4 s.
+
+### 4.1 Full database-loss drill (1.0 criterion)
+
+The quarterly test checks that a dump restores. This drill checks **the whole procedure of section 3** and times it –
+on a test installation (a separate namespace with the same chart and version), **not on production** – step T0
+deletes the database volume.
+The dump comes **from the off-cluster copy** (2.2): that is what a real loss of the cluster or storage looks like.
+
+**Preparation (the day before)**
+
+1. An installation with data close to production (a few environments, users, API keys, active alerts from at least
+   one Alertmanager, a Watchdog).
+2. The nightly backup done and **copied off the cluster** – note its time (`T_backup`).
+
+**Changes after the backup – what the restore must undo and what has to be recovered**
+
+3. Disable the test account `restore-drill`, revoke the API key `restore-drill`, take away one role.
+4. Add a note to an active alert, acknowledge another one.
+5. Wait for the full hour (until `:05`), so the log has an audit chain anchor newer than the backup.
+
+**Loss and restore – time every step**
+
+| Step | Section | Start | End |
+|---|---|---|---|
+| T0: dump of the broken database (3.1), then delete the database volume (simulated loss) | 3.1 | | |
+| Stop the backend | 3.2 | | |
+| Fetch the dump from the off-cluster copy to the volume / pod | 2.2 | | |
+| `pg_restore` | 3.3 | | |
+| Invalidate sessions | 3.4 | | |
+| Take away the access again (from point 3) | 3.5 | | |
+| Start the backend, sign-in works | 3.6 | | |
+| **RTO = end of the last step − T0** | | | |
+
+**Checks**
+
+- [ ] Row counts (`users`, `environments`, `api_keys`, `alerts`, `audit_log`) as in the database at backup time.
+- [ ] Sign-in with SSO and the break-glass account; old sessions do not work.
+- [ ] Account and key `restore-drill` disabled / revoked again, the role taken away (step 3.5 worked).
+- [ ] The note and acknowledgement of point 4 are gone (expected – recorded as lost).
+- [ ] `alerta-admin verify-audit` with anchors: before the backup `MATCHES`, from point 5 `TRUNCATED`; chain `OK`.
+- [ ] Active alerts back after Alertmanager's `repeat_interval`; the Watchdog fresh (`alerta_watchdog_age_seconds`).
+- [ ] Heartbeats back at their next signal; *System status* without errors.
+
+**Result** – write it down here and in the incident log: date, version, dump size, RTO, deviations from the
+procedure, fixes to this runbook. An RTO longer than the table in section 1 says – fix the table (it has to tell the
+truth).

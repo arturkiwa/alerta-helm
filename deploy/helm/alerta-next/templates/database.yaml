@@ -1,0 +1,137 @@
+{{- if .Values.database.internal.enabled }}
+{{- $name := printf "%s-db" (include "alerta-next.fullname" .) }}
+{{- $v := .Values.database.internal }}
+{{- /* PostgreSQL in the cluster: one pod, no backups, no HA – for tests and demos. */}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+    {{- include "alerta-next.selector" (list . "db") | nindent 4 }}
+spec:
+  selector:
+    {{- include "alerta-next.selector" (list . "db") | nindent 4 }}
+  ports:
+    - name: tcp-postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "alerta-next.labels" . | nindent 4 }}
+    {{- include "alerta-next.selector" (list . "db") | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      {{- include "alerta-next.selector" (list . "db") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "alerta-next.selector" (list . "db") | nindent 8 }}
+        app.kubernetes.io/component: database
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: {{ $v.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          env:
+            - name: POSTGRES_DB
+              value: alerta
+            {{- if include "alerta-next.csi" . }}
+            - name: POSTGRES_USER_FILE
+              value: /etc/alerta/secrets/DB_USER
+            - name: POSTGRES_PASSWORD_FILE
+              value: /etc/alerta/secrets/DB_PASSWORD
+            {{- else }}
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: {{ include "alerta-next.dbSecret" . }}, key: username } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "alerta-next.dbSecret" . }}, key: password } }
+            {{- end }}
+            - name: POSTGRES_INITDB_ARGS
+              value: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+          startupProbe:
+            exec: { command: [sh, -c, 'pg_isready -q -h 127.0.0.1 -U "${POSTGRES_USER:-$(cat /etc/alerta/secrets/DB_USER)}" -d alerta'] }
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            exec: { command: [sh, -c, 'pg_isready -q -h 127.0.0.1 -U "${POSTGRES_USER:-$(cat /etc/alerta/secrets/DB_USER)}" -d alerta'] }
+            periodSeconds: 20
+            failureThreshold: 6
+          readinessProbe:
+            exec: { command: [sh, -c, 'pg_isready -q -h 127.0.0.1 -U "${POSTGRES_USER:-$(cat /etc/alerta/secrets/DB_USER)}" -d alerta'] }
+            periodSeconds: 10
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+            {{- if include "alerta-next.csi" . }}
+            - { name: secrets, mountPath: /etc/alerta/secrets, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        {{- if include "alerta-next.csi" . }}
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: {{ include "alerta-next.spcDatabase" . }} }
+        {{- end }}
+      {{- with $v.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $v.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.size }}
+{{- end }}

@@ -1,0 +1,11 @@
+# Use an external PostgreSQL instead of the bundled StatefulSet.
+# 1. Secret alerta-next-db with keys username, password (and optionally migration-username, migration-password).
+# 2. Set DB_URL / DB_SCHEMA in backend-db-patch.yaml; for TLS put the CA into Secret alerta-next-db-ca (key ca.crt).
+# 3. Set the database address range in network-policy.yaml.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: remove-bundled-db.yaml
+  - path: backend-db-patch.yaml
+resources:
+  - network-policy.yaml

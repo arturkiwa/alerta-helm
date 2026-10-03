@@ -1,0 +1,42 @@
+# Identity and network paths of the load generator (a k6 Job, see ../../../../load/).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: load-generator
+automountServiceAccountToken: false
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: load-generator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: load-generator
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerta-next-frontend
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 15008 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-from-load-generator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-frontend
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: load-generator
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 15008 }

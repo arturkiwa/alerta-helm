@@ -1,0 +1,67 @@
+# Alerta Next – quick start (demo / evaluation, NOT production): one command, the whole stack.
+#   docker compose up -d        → http://localhost:8080
+# Settings in .env. Step by step: docs/deployment (Quick start).
+services:
+  db:
+    image: docker.io/library/postgres:18-alpine
+    environment:
+      POSTGRES_DB: alerta
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d alerta"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  backend:
+    image: ${BACKEND_IMAGE}
+    environment:
+      DB_URL: ${DB_URL}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      # plain http://localhost – the session cookie must not require HTTPS here (keep "true" behind HTTPS)
+      SESSION_COOKIE_SECURE: "false"
+      ALERTMANAGER_URL: ${ALERTMANAGER_URL}
+    mem_limit: 1536m   # the JVM sizes its heap from this limit
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    environment:
+      BACKEND_URL: http://backend:8080
+    ports:
+      - "${ALERTA_PORT:-8080}:8080"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # --- optional: profile "monitoring" (COMPOSE_PROFILES in .env) ---------------------------------------------------
+  prometheus:
+    image: docker.io/prom/prometheus:v3.14.0
+    profiles: [monitoring]
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  alertmanager:
+    image: docker.io/prom/alertmanager:v0.34.1
+    profiles: [monitoring]
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+    ports:
+      - "127.0.0.1:9093:9093"
+    restart: unless-stopped
+
+volumes:
+  db-data:

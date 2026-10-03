@@ -1,0 +1,25 @@
+# Ingress (NGINX Ingress Controller). CHANGE: host (and ingressClassName if your controller has another class).
+# TLS: if the ingress terminates TLS, add a "tls:" section with your certificate Secret; if an external load
+# balancer terminates TLS and sends HTTP, keep it as is. The UI MUST be reached over HTTPS: the session cookie is
+# "Secure" (SESSION_COOKIE_SECURE in 30-backend.yaml; set "false" ONLY for a plain-HTTP test).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 5m
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  name: alerta-next
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: alerta.example.com
+    http:
+      paths:
+      - backend:
+          service:
+            name: alerta-next-frontend
+            port:
+              name: http
+        path: /
+        pathType: Prefix

@@ -1,0 +1,181 @@
+# Backend (Spring Boot, 2 replicas). Image: docker.io/arturkiwa/alerta-next-backend – change the tag to upgrade,
+# or the name for your registry mirror (a private registry also needs imagePullSecrets, see docs/deployment).
+# Port 8080 = API (reached only through the frontend), 8081 = health + metrics (/actuator/prometheus, never exposed
+# by the ingress; pod annotations let a Prometheus discover it).
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-backend
+  namespace: alerta-next
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: alerta-next-backend
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-backend
+  namespace: alerta-next
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/name: alerta-next-backend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: alerta-next-backend
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-backend
+  namespace: alerta-next
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: "8081"
+        prometheus.io/scrape: "true"
+      labels:
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/name: alerta-next-backend
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: SPRING_CONFIG_ADDITIONAL_LOCATION
+          value: file:/etc/alerta/
+        - name: DB_URL
+          value: jdbc:postgresql://alerta-next-db:5432/alerta
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: alerta-next-db
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: alerta-next-db
+        - name: ALERTMANAGER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: alerta-next-alertmanager
+              optional: true
+        - name: ALERTMANAGER_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: alerta-next-alertmanager
+              optional: true
+        - name: ALERTMANAGER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: alerta-next-alertmanager
+              optional: true
+        - name: SESSION_COOKIE_SECURE
+          value: "true"
+        image: docker.io/arturkiwa/alerta-next-backend:0.13.0
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 5
+        livenessProbe:
+          failureThreshold: 4
+          httpGet:
+            path: /actuator/health/liveness
+            port: management
+          periodSeconds: 15
+        name: backend
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8081
+          name: management
+        readinessProbe:
+          httpGet:
+            path: /actuator/health/readiness
+            port: management
+          periodSeconds: 10
+        resources:
+          limits:
+            memory: 1536Mi
+          requests:
+            cpu: 250m
+            memory: 768Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 36
+          httpGet:
+            path: /actuator/health/liveness
+            port: management
+          periodSeconds: 5
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+        - mountPath: /var/log/alerta
+          name: logs
+        - mountPath: /etc/alerta
+          name: config
+          readOnly: true
+      securityContext:
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: alerta-next-backend
+      terminationGracePeriodSeconds: 45
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: alerta-next-backend
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      volumes:
+      - emptyDir:
+          sizeLimit: 256Mi
+        name: tmp
+      - emptyDir:
+          sizeLimit: 512Mi
+        name: logs
+      - configMap:
+          name: alerta-next-backend-config
+        name: config
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/part-of: alerta-next
+  name: alerta-next-backend
+  namespace: alerta-next
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend

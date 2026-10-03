@@ -131,7 +131,7 @@ i nie wymaga do nich dostępu.
 | Licencje | Brak – własna aplikacja na otwartych technologiach |
 | Infrastruktura | Niewielka: działa w istniejącym środowisku kontenerowym obok innych usług |
 | Utrzymanie | Czas zespołu; ułatwione przez automatyczne testy, skanowanie i wydania |
-| Ryzyko „wiedzy w jednej głowie” | Ograniczane dokumentacją decyzji architektonicznych, instrukcją wdrożenia, procedurami operacyjnymi i standardowym stosem technologicznym |
+| Ryzyko „wiedzy w jednej głowie” | Ograniczane dokumentacją techniczną, instrukcją wdrożenia, procedurami operacyjnymi i standardowym stosem technologicznym |
 | Ryzyko wdrożenia | Ograniczone: pilotaż i testy akceptacyjne użytkowników przed pełnym przejściem |
 
 ---

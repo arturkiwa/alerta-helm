@@ -1,0 +1,20 @@
+# Voluntary disruptions (node drain, cluster upgrade) always leave one backend and one frontend running.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: alerta-next-backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-backend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: alerta-next-frontend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerta-next-frontend

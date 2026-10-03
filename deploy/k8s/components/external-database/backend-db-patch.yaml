@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alerta-next-backend
+spec:
+  template:
+    spec:
+      containers:
+        - name: backend
+          env:
+            - name: DB_URL # ← the external database; sslmode=verify-full checks certificate and host name
+              value: jdbc:postgresql://db.example.internal:5432/monitoring?sslmode=verify-full&sslrootcert=/etc/alerta/db-ca/ca.crt
+            - name: DB_SCHEMA # ← schema granted to the application (must exist)
+              value: alerta_next
+            - name: DB_POOL_SIZE # per replica; the external database must allow (replicas + 1) × this + a few for the CLI
+              value: "20"
+            # Migrations with a separate account holding DDL rights (remove both to use the application account),
+            # or set DB_MIGRATE=false when a DBA applies backend/src/main/resources/db/migration/*.sql.
+            - name: DB_MIGRATION_USER
+              valueFrom:
+                secretKeyRef: { name: alerta-next-db, key: migration-username }
+            - name: DB_MIGRATION_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: alerta-next-db, key: migration-password }
+          volumeMounts:
+            - name: db-ca
+              mountPath: /etc/alerta/db-ca
+              readOnly: true
+      volumes:
+        - name: db-ca
+          secret:
+            secretName: alerta-next-db-ca

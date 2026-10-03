@@ -1,0 +1,11 @@
+# Overrides for the test cluster only (on top of base/config/application.yml).
+logging:
+  structured:
+    ecs:
+      service:
+        environment: test
+alerta:
+  integrations:
+    alertmanager:
+      # Test Alertmanager in this cluster (deploy/test-monitoring, applied by hand, outside ArgoCD). No token needed.
+      url: http://alertmanager.monitoring.svc:9093

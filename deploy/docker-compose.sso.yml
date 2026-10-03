@@ -1,0 +1,24 @@
+# Local single sign-on: Keycloak with the test realm (backend/src/test/resources/keycloak – users jan.sso, anna.sso,
+# password Sso-Test-Password-2026) and SSO switched on in the backend. Test data only.
+#   docker-compose -f docker-compose.yml -f docker-compose.sso.yml up -d
+# "keycloak" must resolve to 127.0.0.1 in the browser too (e2e: docker run --add-host keycloak:127.0.0.1 …), so that
+# the backend (inside the compose network) and the browser see the same issuer http://keycloak:8180/realms/alerta.
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    command: ["start-dev", "--import-realm", "--http-port=8180"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: dev-only-admin
+      KC_HOSTNAME: http://keycloak:8180
+    volumes:
+      - ../backend/src/test/resources/keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "127.0.0.1:8180:8180"
+
+  backend:
+    environment:
+      ALERTA_AUTH_OIDC_ENABLED: "true"
+      OIDC_ISSUER: http://keycloak:8180/realms/alerta
+      OIDC_CLIENT_ID: alerta-next
+      OIDC_CLIENT_SECRET: test-only-client-secret
