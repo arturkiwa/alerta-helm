@@ -118,6 +118,8 @@ alertmanager:                 # Alertmanager API for silences from the console; 
 
 # Further Alertmanagers (e.g. one per cluster), next to the one above (named "default"). API keys name no
 # Alertmanager: a silence goes to every Alertmanager that has the alert, blackouts to all.
+# One entry = one logical Alertmanager: an HA cluster is ONE entry with the cluster's stable address (Service, VIP),
+# never one entry per replica (deployment guide 8.2).
 # Name: [a-z][a-z0-9-]*, unique.
 alertmanagers: []
 #  - name: waw
@@ -191,6 +193,18 @@ config: {}
 #         insecure-skip-verify: false  # true = do not verify the SSO certificate (tests only; prefer internalCA)
 #         timeout: 10s
 #
+#     integrations:
+#       rule-sources:                  # Rule studio (role "Autor reguł"): Thanos Query / Prometheus, read only
+#         - name: prod
+#           url: http://thanos-query.monitoring-prod.svc:9090
+#           environment-classes: [PROD]  # history next to a rule only from these environments (or environments: [codes])
+#           allow-plain-http: true       # http:// only when allowed explicitly
+#           # bearer-token / username + password (e.g. ${THANOS_PROD_TOKEN} from Vault), ca-file, timeout – optional
+#         - name: dev
+#           url: http://thanos-query.monitoring-dev.svc:9090
+#           environment-classes: [UAT, TEST, DEV]
+#           allow-plain-http: true
+#
 #     session:                         # automatic sign-out
 #       idle-privileged: 30m           # idle limit of administrators (any administrative role)
 #       idle-standard: 8h              # idle limit of everyone else (operators on shift)
@@ -219,6 +233,7 @@ config: {}
 #
 #     links:
 #       allowed-hosts: [grafana.example.com, "*.kibana.example.com"]   # links to other tools and of changes (ArgoCD)
+#       dashboard-url: https://grafana.example.com/d/alerta-next      # Alerta's own dashboard – a link on System status
 #                                      # (Administration → Labels): https only, only these hosts; empty = no links
 #
 #     environments:
@@ -235,6 +250,9 @@ config: {}
 #       resolve-grace: 5m              # an alert counts as resolved only if it stays quiet this long – stops alerts
 #                                      # that flicker from filling the history; 0 = at once (per environment in the UI)
 #       highlight-new: 10m             # the console highlights a new or returning alert this long; 0 = never
+#       reconcile-missing-after: 10m   # an Alertmanager alert resolved while silenced or inhibited gets no "resolved"
+#       reconcile-missing-checks: 10   # webhook – it ends when its Alertmanagers lack it this long and in this many
+#                                      # reads in a row (reads with all their Watchdogs), then the grace window
 #       flapping-threshold: 3          # fired again this many times …
 #       flapping-window: 1h            # … within this period = marked as flapping
 #       # How incoming alerts are read – change only if your alerts use other label/annotation names:
